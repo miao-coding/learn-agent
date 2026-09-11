@@ -133,3 +133,14 @@ class DeleteResponse(BaseModel):
     thread_id: str
     deleted: bool = False
     message: str = ""
+
+
+class DependenciesResponse(BaseModel):
+    """外部依赖健康状态（只读，不含密钥明文）"""
+    backend_ok: bool = True
+    llm_key_set: bool = False
+    llm_base_url: str = ""
+    llm_model: str = ""
+    tavily_key_set: bool = False
+    tavily_key_placeholder: bool = False
+    arxiv_enabled: bool = True

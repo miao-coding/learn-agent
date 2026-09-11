@@ -271,16 +271,23 @@ async def searcher_agent(state: dict, config: RunnableConfig) -> dict[str, Any]:
     except Exception as e:
         logger.warning(f"向量数据库存储失败（不影响主流程）: {e}")
 
-    # ── 构建引用条目（仅有效结果） ─────────────────────────────
+    # ── 构建引用条目（解析 title/url/date，供前端与对账使用） ──
+    from backend.utils.citations import extract_reference_meta
+
     references: list[dict[str, Any]] = []
     ref_id = 1
     for item in search_results:
+        meta = extract_reference_meta(
+            item.get("source", "web"),
+            str(item.get("content", "")),
+            item.get("query", ""),
+        )
         references.append({
             "id": ref_id,
-            "title": item.get("query", "未知来源"),
-            "url": "",
-            "source": item.get("source", "web"),
-            "date": "",
+            "title": meta["title"],
+            "url": meta["url"],
+            "source": meta["source"],
+            "date": meta["date"],
         })
         ref_id += 1
 

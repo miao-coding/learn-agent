@@ -225,9 +225,17 @@ async def writer_agent(state: dict) -> dict[str, Any]:
             "messages": [HumanMessage(content=f"撰稿人调用失败: {e}")],
         }
 
+    # ── 正文引用编号与文献列表对账（P1）────────────────────────
+    from backend.utils.citations import reconcile_references
+
+    reconciled_refs, cite_issues = reconcile_references(report_draft, references)
+    if cite_issues:
+        logger.warning(f"引用对账问题: {cite_issues}")
+
     return {
         "report_draft": report_draft,
         "current_phase": "reviewing",
+        "references": reconciled_refs,
         "messages": [msg],
     }
 

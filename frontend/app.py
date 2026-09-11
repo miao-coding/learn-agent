@@ -143,6 +143,17 @@ def delete_history(thread_id: str) -> bool:
         return False
 
 
+def fetch_dependencies() -> dict | None:
+    """获取后端外部依赖健康状态"""
+    try:
+        resp = requests.get(f"{API_BASE_URL}/api/dependencies", timeout=8)
+        if resp.status_code == 200:
+            return resp.json()
+        return None
+    except Exception:
+        return None
+
+
 def _restore_task(tid: str, topic: str, status: str) -> None:
     """从历史任务恢复会话状态
 
@@ -512,6 +523,24 @@ def render_sidebar():
             st.error("❌ 后端服务未启动")
             st.caption(f"请确认后端运行在 `{API_BASE_URL}`")
 
+        # 依赖健康面板（P2）
+        deps = fetch_dependencies()
+        if deps is not None:
+            with st.expander("🧩 依赖状态", expanded=False):
+                st.caption(
+                    f"LLM：{'✅' if deps.get('llm_key_set') else '❌ 未配置 Key'}"
+                    f"　模型：`{deps.get('llm_model') or '-'}`"
+                )
+                if deps.get("tavily_key_set"):
+                    st.caption("Tavily：✅ 已配置")
+                elif deps.get("tavily_key_placeholder"):
+                    st.warning("Tavily：❌ Key 仍是占位符（网络检索不可用，仅 ArXiv）")
+                else:
+                    st.warning("Tavily：❌ 未配置 Key")
+                if deps.get("llm_base_url"):
+                    st.caption(f"接口：`{deps.get('llm_base_url')}`")
+                st.caption("ArXiv：✅ 默认可用（国内 PDF 可能超时）")
+
         # 历史任务（服务器持久化，刷新/退出不丢失）
         st.divider()
         st.markdown("## 🕘 历史任务")
@@ -526,10 +555,14 @@ def render_sidebar():
                 h_status = item.get("status", "")
                 tid = item.get("thread_id", "")
                 icon = status_icons.get(h_status, "•")
+                h_time = item.get("updated_at") or ""
+                label = f"{icon} {h_topic}"
+                if h_time:
+                    label = f"{label}  ·  {h_time}"
                 col_open, col_del = st.columns([5, 1])
                 with col_open:
                     if st.button(
-                        f"{icon} {h_topic}",
+                        label,
                         key=f"hist-{tid}",
                         use_container_width=True,
                     ):

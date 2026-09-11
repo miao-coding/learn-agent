@@ -23,6 +23,7 @@ from backend.api.schemas import (
     AdminTestResponse,
     AvailableModelsResponse,
     DeleteResponse,
+    DependenciesResponse,
     HealthResponse,
     HistoryItem,
     ReportResponse,
@@ -681,6 +682,8 @@ async def list_history(request: Request, limit: int = 20):
 
     # 逐个取任务状态（topic / current_phase）
     items: list[HistoryItem] = []
+    from backend.utils.checkpoint_time import format_checkpoint_time
+
     for tid, ts in rows:
         try:
             snap = await graph.aget_state({"configurable": {"thread_id": tid}})
@@ -691,7 +694,7 @@ async def list_history(request: Request, limit: int = 20):
                 thread_id=tid,
                 topic=str(values.get("topic", ""))[:60],
                 status=str(values.get("current_phase", "")),
-                updated_at=str(ts),
+                updated_at=format_checkpoint_time(str(ts)),
             ))
         except Exception:
             continue
@@ -778,3 +781,23 @@ async def delete_research(thread_id: str, request: Request):
 async def health_check():
     """健康检查端点"""
     return HealthResponse()
+
+
+@router.get("/dependencies", response_model=DependenciesResponse)
+async def get_dependencies():
+    """外部依赖状态（前端侧边栏依赖面板；不含密钥明文）"""
+    tavily_raw = (settings.tavily_api_key or "").strip()
+    placeholder = (
+        not tavily_raw
+        or tavily_raw.startswith("your-")
+        or tavily_raw == "your-tavily-api-key-here"
+    )
+    return DependenciesResponse(
+        backend_ok=True,
+        llm_key_set=bool((settings.openai_api_key or "").strip()),
+        llm_base_url=settings.openai_base_url or "",
+        llm_model=settings.openai_model or "",
+        tavily_key_set=bool(tavily_raw) and not placeholder,
+        tavily_key_placeholder=placeholder,
+        arxiv_enabled=True,
+    )
