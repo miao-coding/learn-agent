@@ -3,23 +3,23 @@ feature: p0-fail-health-writer
 status: delivered
 updated: 2026-09-11
 branch: main
-commits: d3f9cf6..working-tree
+commits: d3f9cf6..9f6e0ed
 ---
 
 # P0：失败态、工具健康告警、撰稿输出校验
 
 ## Report
 
-**What was built** — MAMBA 暴露的三类系统缺陷已闭环：检索/分析/撰稿失败进入终态 `failed`（不再伪装 reviewing）；Tavily/ArXiv 等工具失败会以 `⚠️` 实时推到前端并计入失败摘要；撰稿输出经 `_strip_llm_preamble` + `_validate_report`，脏输出最多重写一次。SSE 在 failed 时发 `phase:failed` + `error`，不再误报 completed。审核 API 对 failed 返回 400。前端支持 failed 历史图标、恢复与错误条。
+**What was built** — MAMBA 暴露的三类系统缺陷已闭环：检索/分析/撰稿失败进入终态 `failed`（不再伪装 reviewing）；Tavily/ArXiv 等工具失败会以 `⚠️` 实时推到前端并计入失败摘要；撰稿输出经 `_strip_llm_preamble` + `_validate_report`，脏输出最多重写一次。SSE 在 failed 时发 `phase:failed` + `error`，不再误报 completed。审核 API 对 failed 返回 400。前端支持 failed 历史图标、恢复与错误条。另修复 searcher 函数内 `import arxiv_search` 导致的 `UnboundLocalError`（任务启动即崩）。
 
-**Verification** — `pytest tests/` **133 passed**；已部署服务器（api/web active，`/api/health` ok）。
+**Verification** — `pytest tests/` **134 passed**；线上 MAMBA e2e（thread `49ccc229`，仅 ArXiv、Tavily 无效 Key）产出 reviewing 草稿约 **10234 字 / 18 引用 / 2 图**，以 `#` 开头、无前缀、单一 H1；Tavily 失败日志可见。已部署服务器。
 
 **Journey log**
 1. 线性图拓扑下 failed 需节点短路透传，否则会“走完”reviewer 把 phase 写回 reviewing。
 2. `NODE_PHASE_MAP` 驱动的 SSE 阶段会掩盖节点真实 `current_phase`，必须优先读 state。
 3. ArXiv 空结果文案是「未找到相关学术论文」，与 Tavily「未找到相关搜索结果」不同，漏标会重新引入假成功。
-4. 先 strip 再 validate 会吃掉重复标题等典型脏样，重试主要覆盖 strip 后的残留问题。
-5. 评审后补了 live SSE failed 路径、ArXiv 空结果 marker、审核 400 detail 透出。
+4. 函数内重复 `from ... import arxiv_search` 会形成局部绑定 → `UnboundLocalError`，即使顶层已导入。
+5. 无有效 Tavily Key 时全流程可依赖 ArXiv 完成，但检索耗时显著变长（PDF 超时）。
 
 ## [S1] Problem
 
