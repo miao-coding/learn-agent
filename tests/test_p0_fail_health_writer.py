@@ -68,6 +68,17 @@ class TestStripPreamble:
         assert _strip_llm_preamble(raw).startswith("# 标题")
 
 
+class TestSearcherNoLocalArxivShadow:
+    def test_fallback_does_not_reimport_arxiv_search(self):
+        """回归：函数内 import arxiv_search 会遮蔽顶层导入，导致 UnboundLocalError"""
+        import inspect
+
+        from backend.agents import searcher as searcher_mod
+
+        src = inspect.getsource(searcher_mod.searcher_agent)
+        assert "from backend.tools.arxiv_tool import arxiv_search" not in src
+
+
 class TestFailedPhaseShortCircuit:
     def test_analyst_passthrough_when_failed(self):
         import asyncio

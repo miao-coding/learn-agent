@@ -217,8 +217,6 @@ async def searcher_agent(state: dict, config: RunnableConfig) -> dict[str, Any]:
     if not search_results:
         fallback_query = topic
         try:
-            from backend.tools.arxiv_tool import arxiv_search
-
             await report_progress(config, f"🛠 兜底 arxiv_search：{fallback_query}")
             raw = await asyncio.to_thread(arxiv_search.invoke, {"query": fallback_query})
             text = str(raw or "").strip()
