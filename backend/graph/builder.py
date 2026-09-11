@@ -82,6 +82,15 @@ async def reviewer_node(state: AgentState) -> dict[str, Any]:
         状态更新字典，由 should_continue_or_end 条件边决定下一步
     """
     report_draft = state.get("report_draft", "")
+    phase = state.get("current_phase", "")
+    # 失败终态：不进入人工审核
+    if phase == "failed":
+        logger.info("任务处于 failed，跳过人工审核")
+        return {
+            "final_report": report_draft,
+            "current_phase": "failed",
+        }
+
     logger.info("草稿已生成，进入等待人工审核状态")
 
     return {

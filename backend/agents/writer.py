@@ -48,7 +48,14 @@ WRITER_SYSTEM_PROMPT = """你是一个专业的学术综述撰稿人。你的任
 - 如果有修改意见，请针对性修改并确保质量提升
 
 RAG 检索能力：你可以使用 rag_search 工具从向量数据库中检索相关文档片段。
-当你需要核实某个论断的文献依据、补充引用细节时，主动调用 rag_search 获取最相关的信息。"""
+当你需要核实某个论断的文献依据、补充引用细节时，主动调用 rag_search 获取最相关的信息。
+
+输出硬性约束：
+- 直接输出完整 Markdown 报告正文，必须以 `# ` 标题开头
+- 禁止输出“已核实完毕/以下是报告/修正后重新输出”等过程说明
+- 禁止把同一份报告重贴多遍；若需修改，只输出一份最终完整报告
+- 禁止重复“参考文献”章节
+"""
 
 
 async def writer_agent(state: dict) -> dict[str, Any]:
@@ -72,6 +79,14 @@ async def writer_agent(state: dict) -> dict[str, Any]:
     references = state.get("references", [])
     logger.info(f"撰稿人开始工作，主题: {topic}")
 
+    # 上游已失败：短路透传
+    if state.get("current_phase") == "failed":
+        return {
+            "report_draft": state.get("report_draft") or f"# {topic}\n\n> 任务失败",
+            "current_phase": "failed",
+            "messages": [HumanMessage(content="上游已失败，跳过撰稿")],
+        }
+
     if review_feedback:
         logger.info(f"撰稿人收到修改意见: {review_feedback}")
 
@@ -79,9 +94,10 @@ async def writer_agent(state: dict) -> dict[str, Any]:
     if not analysis_data or analysis_data.get("error"):
         error_msg = analysis_data.get("error", "分析数据为空") if analysis_data else "分析数据为空"
         logger.warning(f"分析数据不可用: {error_msg}")
+        # 失败终态：不进入人工审核
         return {
-            "report_draft": f"# {topic}\n\n> 报告生成失败：{error_msg}",
-            "current_phase": "reviewing",
+            "report_draft": f"# {topic}\n\n> 任务失败：{error_msg}",
+            "current_phase": "failed",
             "messages": [HumanMessage(content=f"分析数据不可用: {error_msg}")],
         }
 
@@ -172,12 +188,42 @@ async def writer_agent(state: dict) -> dict[str, Any]:
             response = await llm_with_tools.ainvoke(messages)
 
         report_draft = response.content.strip()
+        report_draft = _strip_llm_preamble(report_draft)
+        issues = _validate_report(report_draft)
+        if issues:
+            logger.warning(f"撰稿输出质量校验失败: {issues}，尝试重写一次")
+            messages.append(
+                HumanMessage(
+                    content=(
+                        "上一版报告未通过质量校验，问题："
+                        + "；".join(issues)
+                        + "。请直接输出一份干净的完整 Markdown 综述："
+                        "以 # 标题开头，禁止过程说明，禁止整篇重贴，"
+                        "禁止重复摘要/参考文献章节，禁止乱码。"
+                    )
+                )
+            )
+            try:
+                retry_resp = await llm_with_tools.ainvoke(messages)
+                retry_text = _strip_llm_preamble(str(retry_resp.content or "").strip())
+                retry_issues = _validate_report(retry_text)
+                if retry_text and (not retry_issues or len(retry_issues) < len(issues)):
+                    report_draft = retry_text
+                    issues = retry_issues
+            except Exception as retry_err:
+                logger.warning(f"撰稿重写失败: {retry_err}")
+        if issues:
+            logger.warning(f"撰稿仍存在质量问题（已保留清洗结果）: {issues}")
         msg = response if not review_feedback else HumanMessage(content="报告已修改完成")
         logger.info(f"撰稿人生成报告，长度: {len(report_draft)} 字符")
     except Exception as e:
         logger.error(f"撰稿人 LLM 调用失败: {e}")
-        report_draft = f"# {topic}\n\n> 报告生成失败：LLM 调用错误 - {e}"
-        msg = HumanMessage(content=f"撰稿人调用失败: {e}")
+        report_draft = f"# {topic}\n\n> 任务失败：LLM 调用错误 - {e}"
+        return {
+            "report_draft": report_draft,
+            "current_phase": "failed",
+            "messages": [HumanMessage(content=f"撰稿人调用失败: {e}")],
+        }
 
     return {
         "report_draft": report_draft,
@@ -260,3 +306,104 @@ def _format_references(references: list[dict[str, Any]]) -> str:
         parts.append(line)
 
     return "\n".join(parts)
+
+
+def _strip_llm_preamble(text: str) -> str:
+    """清洗撰稿输出：去掉自言自语、拼接的重复报告、乱码后重贴的整篇
+
+    实测问题（MAMBA 任务）：
+    - 正文前有“所有关键文献已核实完毕…”
+    - 中途出现“以下为修正后的完整报告”后又整篇重贴
+    - 参考文献章节重复多次
+    """
+    import re
+
+    if not text:
+        return text
+
+    # 1) 若包含“修正后重新输出/完整报告”分段，优先取最后一段干净正文
+    split_markers = [
+        r"以下为修正后的完整报告",
+        r"修正后的完整报告",
+        r"重新输出的完整报告",
+        r"去除乱码后重新输出",
+    ]
+    for marker in split_markers:
+        parts = re.split(marker, text)
+        if len(parts) >= 2:
+            tail = parts[-1].lstrip("：:\n\r-— ")
+            # 去掉可能残留的分隔线
+            tail = re.sub(r"^-{3,}\s*$", "", tail, flags=re.M).strip()
+            if tail.lstrip().startswith("#"):
+                text = tail
+                break
+
+    # 2) 从第一个 Markdown 标题开始
+    stripped = text.lstrip()
+    if not stripped.startswith("#"):
+        m = re.search(r"(?m)^#{1,2}\s+\S", text)
+        if m:
+            text = text[m.start():].lstrip()
+        else:
+            m = re.search(r"(?m)^---\s*$", text)
+            if m:
+                tail = text[m.end():].lstrip()
+                if tail.startswith("#"):
+                    text = tail
+
+    # 3) 多个一级标题时，只保留第一篇（避免整篇报告被重贴拼接）
+    lines = text.splitlines()
+    h1_idx = [i for i, ln in enumerate(lines) if ln.startswith("# ")]
+    if len(h1_idx) >= 2:
+        text = "\n".join(lines[: h1_idx[1]]).rstrip() + "\n"
+
+    # 4) 参考文献章节只保留第一次出现
+    refs = list(re.finditer(r"(?m)^##\s*(参考文献|References)\s*$", text))
+    if len(refs) >= 2:
+        text = text[: refs[1].start()].rstrip() + "\n"
+
+    return text.strip() + ("\n" if text.strip() else "")
+
+
+def _validate_report(text: str) -> list[str]:
+    """检测撰稿输出的硬伤，返回问题列表（空列表表示通过）"""
+    import re
+
+    issues: list[str] = []
+    if not text or not text.strip():
+        return ["报告为空"]
+
+    body = text.strip()
+    if not body.startswith("#"):
+        issues.append("未以 Markdown 标题开头")
+
+    h1_count = len(re.findall(r"(?m)^#\s+\S", body))
+    if h1_count >= 2:
+        issues.append(f"一级标题重复 {h1_count} 次（疑似整篇重贴）")
+
+    for pat, label in (
+        (r"(?m)^##\s*摘要", "摘要章节"),
+        (r"(?m)^##\s*(参考文献|References)", "参考文献章节"),
+    ):
+        n = len(re.findall(pat, body))
+        if n >= 2:
+            issues.append(f"{label}重复 {n} 次")
+
+    process_markers = (
+        "已核实完毕",
+        "以下是完整的文献综述报告",
+        "修正后的完整报告",
+        "去除乱码后重新输出",
+    )
+    for m in process_markers:
+        if m in body:
+            issues.append(f"仍含过程说明：{m}")
+
+    if "�" in body:
+        issues.append("含 Unicode 替换字符（乱码）")
+    # 异常控制字符（保留 \n\t）
+    ctrl = re.findall(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", body)
+    if len(ctrl) >= 3:
+        issues.append(f"含 {len(ctrl)} 个异常控制字符")
+
+    return issues

@@ -83,12 +83,27 @@ async def analyst_agent(state: dict) -> dict[str, Any]:
     search_results = state.get("search_results", [])
     logger.info(f"分析师开始工作，主题: {topic}，搜索结果数: {len(search_results)}")
 
+    # 上游已失败：短路透传，不继续分析
+    if state.get("current_phase") == "failed":
+        return {
+            "analysis_data": state.get("analysis_data") or {"error": "上游检索失败"},
+            "current_phase": "failed",
+            "report_draft": state.get("report_draft", ""),
+            "messages": [HumanMessage(content="上游已失败，跳过分析")],
+        }
+
     # ── 构建分析输入：将所有搜索结果拼接 ───────────────────────
     if not search_results:
         logger.warning("搜索结果为空，分析师无法进行分析")
+        # 上游已 failed 时保持 failed；否则将本节点标为 failed（不再进入审核）
+        phase = state.get("current_phase") or "failed"
+        if phase not in ("failed",):
+            phase = "failed"
         return {
             "analysis_data": {"error": "搜索结果为空，无法进行分析"},
-            "current_phase": "analyzing",
+            "current_phase": phase,
+            "report_draft": state.get("report_draft")
+            or f"# {topic}\n\n> 任务失败：搜索结果为空，无法进行分析",
             "messages": [HumanMessage(content="搜索结果为空，无法进行分析")],
         }
 
@@ -194,7 +209,8 @@ async def analyst_agent(state: dict) -> dict[str, Any]:
         logger.error(f"分析师 LLM 调用失败: {e}")
         return {
             "analysis_data": {"error": f"LLM 调用失败: {e}"},
-            "current_phase": "analyzing",
+            "current_phase": "failed",
+            "report_draft": f"# {topic}\n\n> 任务失败：分析阶段 LLM 调用失败 - {e}",
             "messages": [HumanMessage(content=f"分析失败: {e}")],
         }
 

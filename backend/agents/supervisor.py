@@ -66,6 +66,9 @@ def should_continue_or_end(state: dict[str, Any]) -> str:
     revision_count = state.get("revision_count", 0)
     max_revisions = state.get("max_revisions", 3)
 
+    if state.get("current_phase") == "failed":
+        return "completed"
+
     if state.get("current_phase") == "writing":
         if revision_count >= max_revisions:
             logger.warning(f"已达到最大修改次数 ({max_revisions})，强制结束")

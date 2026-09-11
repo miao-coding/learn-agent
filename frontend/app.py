@@ -33,6 +33,7 @@ def init_session_state():
             "writing": False,
             "reviewing": False,
             "completed": False,
+            "failed": False,
         },
         "current_phase": "",
         "progress_messages": [],
@@ -131,6 +132,17 @@ def fetch_history(limit: int = 15) -> list:
         return []
 
 
+def delete_history(thread_id: str) -> bool:
+    """删除指定历史研究报告（服务端清 checkpoints 持久化数据）"""
+    try:
+        resp = requests.delete(
+            f"{API_BASE_URL}/api/research/{thread_id}", timeout=15
+        )
+        return resp.status_code == 200 and resp.json().get("deleted", False)
+    except Exception:
+        return False
+
+
 def _restore_task(tid: str, topic: str, status: str) -> None:
     """从历史任务恢复会话状态
 
@@ -155,6 +167,10 @@ def _restore_task(tid: str, topic: str, status: str) -> None:
     if status == "completed":
         st.session_state.task_status = "completed"
         st.session_state.stream_consumed = True
+    elif status == "failed":
+        st.session_state.task_status = "error"
+        st.session_state.stream_consumed = True
+        st.session_state.error_message = "任务已失败（检索或生成未完成）"
     elif status == "reviewing":
         st.session_state.task_status = "reviewing"
         st.session_state.stream_consumed = True
@@ -201,18 +217,22 @@ def submit_research(topic: str, model_name: str = "") -> dict | None:
 
 
 def submit_review(thread_id: str, feedback: str) -> dict | None:
-    """提交审核"""
+    """提交审核；4xx 时返回带 message 的错误字典以便前端展示 detail"""
     try:
         resp = requests.post(
             f"{API_BASE_URL}/api/research/{thread_id}/review",
             json={"feedback": feedback},
-            timeout=10,
+            timeout=15,
         )
         if resp.status_code == 200:
             return resp.json()
-        return None
-    except Exception:
-        return None
+        try:
+            detail = resp.json().get("detail", "")
+        except Exception:
+            detail = (resp.text or "")[:160]
+        return {"status": "error", "message": detail or f"HTTP {resp.status_code}"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
 
 
 def get_report(thread_id: str) -> dict | None:
@@ -303,19 +323,36 @@ def process_stream(thread_id: str):
     st.session_state.task_status = "running"
     st.session_state.stream_consumed = False
 
-    # 使用占位符实时更新
-    progress_placeholder = st.empty()
-    status_container = progress_placeholder.container()
+    # 使用占位符实时更新（阶段区与日志区分离，避免 heartbeat 整块重绘导致页面跳动）
+    phases_placeholder = st.empty()
+    log_placeholder = st.empty()
+    meta_placeholder = st.empty()
 
     token_buffer = []  # 用于收集 token 事件的内容
     t0 = time.time()  # 任务开始时间（用于运行计时显示）
+    last_render = 0.0
+
+    def _paint(force: bool = False, writing_chars: int | None = None):
+        nonlocal last_render
+        now = time.time()
+        # 心跳/token 高频事件节流：至少间隔 1.5s，避免页面被 empty() 反复顶到底部
+        if not force and (now - last_render) < 1.5:
+            return
+        last_render = now
+        elapsed = int(now - t0)
+        with phases_placeholder.container():
+            _render_phase_steps()
+        with log_placeholder.container():
+            _render_progress_log()
+        with meta_placeholder.container():
+            if writing_chars is not None:
+                st.caption(f"✍️ 正在撰写综述… 已生成 {writing_chars} 字 · 已运行 {elapsed // 60}:{elapsed % 60:02d}")
+            else:
+                st.caption(f"⏱ 已运行 {elapsed // 60}:{elapsed % 60:02d} · 连接正常，系统处理中")
 
     for event_type, data in consume_sse_sync(thread_id):
         if event_type == "heartbeat":
-            # 心跳：证明后端仍在运行，刷新计时显示
-            _render_progress_in_placeholder(
-                status_container, elapsed_sec=int(time.time() - t0)
-            )
+            _paint()
             continue
 
         if event_type == "phase":
@@ -323,36 +360,32 @@ def process_stream(thread_id: str):
             st.session_state.current_phase = phase
             if phase in st.session_state.phases:
                 st.session_state.phases[phase] = True
-            # 更新进度显示
-            _render_progress_in_placeholder(
-                status_container, elapsed_sec=int(time.time() - t0)
-            )
+            if phase == "failed":
+                st.session_state.task_status = "error"
+                if not st.session_state.error_message:
+                    st.session_state.error_message = "任务已失败（检索或生成未完成）"
+            _paint(force=True)
 
         elif event_type == "progress":
             msg = data.get("message", "")
             st.session_state.progress_messages.append(msg)
-            _render_progress_in_placeholder(
-                status_container, elapsed_sec=int(time.time() - t0)
-            )
+            # 只保留最近 50 条，防止 session 无限膨胀
+            if len(st.session_state.progress_messages) > 50:
+                st.session_state.progress_messages = st.session_state.progress_messages[-50:]
+            _paint(force=True)
 
         elif event_type == "token":
             content = data.get("content", "")
             token_buffer.append(content)
-            # 撰写阶段实时显示已生成字数（每 10 个 token 节流刷新一次）
-            if len(token_buffer) % 10 == 0:
+            if len(token_buffer) % 20 == 0:
                 total_chars = sum(len(c) for c in token_buffer)
-                _render_progress_in_placeholder(
-                    status_container,
-                    writing_chars=total_chars,
-                    elapsed_sec=int(time.time() - t0),
-                )
+                _paint(writing_chars=total_chars)
 
         elif event_type == "complete":
             report = data.get("report", "")
             if token_buffer:
                 report = "".join(token_buffer) if not report else report
             st.session_state.report = report
-            # 如果 complete 事件携带 references/charts，直接保存
             refs = data.get("references", [])
             charts = data.get("charts", [])
             if refs:
@@ -362,7 +395,7 @@ def process_stream(thread_id: str):
             st.session_state.task_status = "completed"
             st.session_state.phases["completed"] = True
             st.session_state.stream_consumed = True
-            _render_progress_in_placeholder(status_container)
+            _paint(force=True)
             break
 
         elif event_type == "interrupt":
@@ -374,7 +407,7 @@ def process_stream(thread_id: str):
             st.session_state.task_status = "reviewing"
             st.session_state.phases["reviewing"] = True
             st.session_state.stream_consumed = True
-            _render_progress_in_placeholder(status_container)
+            _paint(force=True)
             break
 
         elif event_type == "error":
@@ -382,29 +415,59 @@ def process_stream(thread_id: str):
             st.session_state.error_message = err_msg
             st.session_state.task_status = "error"
             st.session_state.stream_consumed = True
-            _render_progress_in_placeholder(status_container)
+            _paint(force=True)
             break
 
 
-def _render_progress_in_placeholder(
-    container, writing_chars: int | None = None, elapsed_sec: int | None = None
-):
-    """在占位符容器中渲染进度状态
+def _render_phase_steps():
+    """渲染阶段步骤条（固定五步，不随消息增长）"""
+    phases_info = [
+        ("searching", "🔍 文献检索", "ArXiv 论文 + 网络补充资料"),
+        ("analyzing", "📊 文献分析", "方法分类、性能对比、研究空白"),
+        ("writing", "✍️ 撰写综述", "生成带引用的综述报告"),
+        ("reviewing", "👀 等待审核", "人工审核反馈"),
+        ("completed", "✅ 完成", "报告已生成"),
+    ]
+    for phase_key, label, desc in phases_info:
+        done = st.session_state.phases.get(phase_key, False)
+        is_current = st.session_state.current_phase == phase_key and not done
+        if done:
+            st.markdown(f"&nbsp;&nbsp;✅ ~~{label}~~ · {desc}")
+        elif is_current:
+            st.markdown(f"&nbsp;&nbsp;🔄 **{label}** · {desc}")
+        else:
+            st.markdown(f"&nbsp;&nbsp;⚪ {label} · {desc}")
 
-    Args:
-        container: st.empty 占位容器
-        writing_chars: 撰写阶段已生成字数（非 None 时额外显示实时字数）
-        elapsed_sec: 任务已运行秒数（非 None 时显示运行计时，
-            由 SSE 心跳驱动每 10 秒刷新，让用户确认系统仍在运行）
-    """
-    container.empty()
-    with container:
-        _render_progress_ui()
-        if writing_chars is not None:
-            st.markdown(f"&nbsp;&nbsp;✍️ 正在撰写综述... 已生成 **{writing_chars}** 字")
-        if elapsed_sec is not None:
-            mm, ss = divmod(elapsed_sec, 60)
-            st.markdown(f"&nbsp;&nbsp;⏱ 已运行 **{mm}:{ss:02d}** · 连接正常，系统处理中")
+
+def _render_progress_log(max_lines: int = 24):
+    """固定高度日志框：只显示最近若干条，整页高度不随消息变长"""
+    messages = st.session_state.progress_messages[-max_lines:]
+    if not messages:
+        return
+    # 单块 HTML 滚动容器，避免 Streamlit 逐条 markdown 撑开页面
+    lines = "".join(
+        f"<div style='margin:0 0 4px 0;line-height:1.45'>→ {_html_escape(m)}</div>"
+        for m in messages
+    )
+    st.markdown(
+        f"""
+        <div style="max-height:220px;overflow-y:auto;border:1px solid rgba(128,128,128,.35);
+                    border-radius:8px;padding:10px 12px;font-size:0.88rem;background:rgba(128,128,128,.06)">
+          <div style="font-weight:600;margin-bottom:6px">📝 详细进度（最近 {len(messages)} 条）</div>
+          {lines}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _html_escape(text: str) -> str:
+    return (
+        str(text)
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
 
 
 # ============ UI 组件 ============
@@ -456,18 +519,42 @@ def render_sidebar():
         if history:
             status_icons = {
                 "reviewing": "👀", "completed": "✅", "searching": "🔍",
-                "analyzing": "📊", "writing": "✍️",
+                "analyzing": "📊", "writing": "✍️", "failed": "❌",
             }
             for item in history[:10]:
                 h_topic = (item.get("topic") or "未命名")[:24]
                 h_status = item.get("status", "")
+                tid = item.get("thread_id", "")
                 icon = status_icons.get(h_status, "•")
-                if st.button(
-                    f"{icon} {h_topic}",
-                    key=f"hist-{item.get('thread_id', '')}",
-                    use_container_width=True,
-                ):
-                    _restore_task(item["thread_id"], item.get("topic", ""), h_status)
+                col_open, col_del = st.columns([5, 1])
+                with col_open:
+                    if st.button(
+                        f"{icon} {h_topic}",
+                        key=f"hist-{tid}",
+                        use_container_width=True,
+                    ):
+                        _restore_task(tid, item.get("topic", ""), h_status)
+                with col_del:
+                    if st.button(
+                        "🗑",
+                        key=f"hist-del-{tid}",
+                        help=f"删除「{h_topic}」",
+                    ):
+                        if delete_history(tid):
+                            # 若删除的是当前查看的任务，一并清空界面
+                            if st.session_state.get("thread_id") == tid:
+                                st.session_state.thread_id = None
+                                st.session_state.report = ""
+                                st.session_state.report_draft = ""
+                                st.session_state.references = []
+                                st.session_state.charts = []
+                                st.session_state.progress_messages = []
+                                st.session_state.is_reviewing = False
+                                st.session_state.task_status = "idle"
+                            st.success(f"已删除：{h_topic}")
+                            st.rerun()
+                        else:
+                            st.error("删除失败，请重试")
         else:
             st.caption("暂无历史任务")
 
@@ -649,41 +736,14 @@ def render_progress_section():
             st.markdown(f"&nbsp;&nbsp;⚪ {label} · {desc}")
 
     # 显示进度消息（固定高度滚动容器，页面不被撑长）
-    if st.session_state.progress_messages:
-        st.markdown("📝 详细进度")
-        with st.container(height=260):
-            for msg in st.session_state.progress_messages:
-                st.markdown(f"→ {msg}")
+    _render_progress_log()
 
 
 def _render_progress_ui():
-    """在流式处理过程中渲染进度 UI（被 process_stream 调用）"""
+    """在流式处理过程中渲染进度 UI（兼容旧调用）"""
     st.markdown("### 📊 任务进度")
-
-    phases_info = [
-        ("searching", "🔍 文献检索", "ArXiv 论文 + 网络补充资料"),
-        ("analyzing", "📊 文献分析", "方法分类、性能对比、研究空白"),
-        ("writing", "✍️ 撰写综述", "生成带引用的综述报告"),
-        ("reviewing", "👀 等待审核", "人工审核反馈"),
-        ("completed", "✅ 完成", "报告已生成"),
-    ]
-
-    for phase_key, label, desc in phases_info:
-        done = st.session_state.phases.get(phase_key, False)
-        is_current = (st.session_state.current_phase == phase_key
-                      and not done)
-
-        if done:
-            st.markdown(f"&nbsp;&nbsp;✅ ~~{label}~~ · {desc}")
-        elif is_current:
-            st.markdown(f"&nbsp;&nbsp;🔄 **{label}** · {desc}")
-        else:
-            st.markdown(f"&nbsp;&nbsp;⚪ {label} · {desc}")
-
-    if st.session_state.progress_messages:
-        with st.container(height=260):
-            for msg in st.session_state.progress_messages[-12:]:
-                st.markdown(f"→ {msg}")
+    _render_phase_steps()
+    _render_progress_log()
 
 
 def render_report_section():
@@ -696,6 +756,26 @@ def render_report_section():
 
     st.divider()
     st.markdown("### 📝 综述报告")
+
+    # 当前报告也可手动删除（与历史列表共用同一接口）
+    tid_now = st.session_state.get("thread_id") or ""
+    if tid_now and st.session_state.task_status in ("completed", "reviewing"):
+        col_title, col_del = st.columns([6, 1])
+        with col_del:
+            if st.button("🗑 删除报告", key="del-current-report"):
+                if delete_history(tid_now):
+                    st.session_state.thread_id = None
+                    st.session_state.report = ""
+                    st.session_state.report_draft = ""
+                    st.session_state.references = []
+                    st.session_state.charts = []
+                    st.session_state.progress_messages = []
+                    st.session_state.is_reviewing = False
+                    st.session_state.task_status = "idle"
+                    st.success("报告已删除")
+                    st.rerun()
+                else:
+                    st.error("删除失败")
 
     if report:
         # 最终报告 — 使用 Tabs 组织内容
@@ -857,6 +937,10 @@ def _do_review(feedback: str):
 
     status = result.get("status", "")
     message = result.get("message", "")
+
+    if status == "error":
+        st.error(f"审核提交失败：{message}")
+        return
 
     if status == "approved":
         st.success(f"✅ 审核通过！{message}")

@@ -126,3 +126,10 @@ class HistoryItem(BaseModel):
     topic: str = ""
     status: str = ""
     updated_at: str = ""
+
+
+class DeleteResponse(BaseModel):
+    """删除研究任务响应"""
+    thread_id: str
+    deleted: bool = False
+    message: str = ""

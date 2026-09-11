@@ -27,6 +27,24 @@ from backend.utils.progress import report_progress
 
 logger = logging.getLogger(__name__)
 
+# 工具返回中的失败特征：用于健康告警与结果过滤
+_TOOL_FAIL_MARKERS = (
+    "搜索失败",
+    "配置错误",
+    "Unauthorized",
+    "invalid api key",
+    "工具调用失败",
+    "未找到相关搜索结果",
+    "未找到相关学术论文",
+    "未找到相关",
+)
+
+
+def _is_tool_failure(result: str) -> bool:
+    text = str(result or "")
+    return any(m in text for m in _TOOL_FAIL_MARKERS)
+
+
 # ── 搜索员系统提示词 ─────────────────────────────────────────────
 SEARCHER_SYSTEM_PROMPT = """你是一个专业的学术文献检索员。你的任务是根据给定的研究方向，进行全面的文献检索，收集相关学术论文和研究资料。
 
@@ -94,6 +112,7 @@ async def searcher_agent(state: dict, config: RunnableConfig) -> dict[str, Any]:
     # ── 工具调用循环（最多 10 轮） ─────────────────────────────
     all_search_results: list[dict[str, Any]] = []
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    tool_failures: list[str] = []
 
     for i in range(10):
         logger.debug(f"搜索员第 {i + 1} 轮工具调用")
@@ -102,6 +121,7 @@ async def searcher_agent(state: dict, config: RunnableConfig) -> dict[str, Any]:
             response = await llm_with_tools.ainvoke(messages)
         except Exception as e:
             logger.error(f"LLM 调用失败: {e}")
+            tool_failures.append(f"LLM: {e}")
             break
 
         messages.append(response)
@@ -124,15 +144,22 @@ async def searcher_agent(state: dict, config: RunnableConfig) -> dict[str, Any]:
                 try:
                     # 同步工具放线程池执行，避免阻塞事件循环
                     result = await asyncio.to_thread(tool_map[tool_name].invoke, tool_args)
+                    result_text = str(result)
                     messages.append(
-                        ToolMessage(content=str(result), tool_call_id=tool_call["id"])
+                        ToolMessage(content=result_text, tool_call_id=tool_call["id"])
                     )
+                    # 工具健康：失败结果不进入文献池，并向前端告警
+                    if _is_tool_failure(result_text):
+                        fail_hint = result_text.strip().splitlines()[0][:120] if result_text.strip() else "未知错误"
+                        tool_failures.append(f"{tool_name}: {fail_hint}")
+                        await report_progress(config, f"⚠️ {tool_name} 失败：{fail_hint}")
+                        continue
                     # 记录搜索结果
                     if tool_name == "tavily_search":
                         all_search_results.append(
                             {
                                 "query": tool_args.get("query", ""),
-                                "result": result,
+                                "result": result_text,
                                 "source": "web",
                             }
                         )
@@ -140,7 +167,7 @@ async def searcher_agent(state: dict, config: RunnableConfig) -> dict[str, Any]:
                         all_search_results.append(
                             {
                                 "query": tool_args.get("query", ""),
-                                "result": result,
+                                "result": result_text,
                                 "source": "arxiv",
                             }
                         )
@@ -148,12 +175,14 @@ async def searcher_agent(state: dict, config: RunnableConfig) -> dict[str, Any]:
                         all_search_results.append(
                             {
                                 "query": tool_args.get("paper_id", ""),
-                                "result": result,
+                                "result": result_text,
                                 "source": "arxiv_pdf",
                             }
                         )
                 except Exception as e:
                     logger.error(f"工具 {tool_name} 调用失败: {e}")
+                    tool_failures.append(f"{tool_name}: {e}")
+                    await report_progress(config, f"⚠️ {tool_name} 异常：{e}")
                     messages.append(
                         ToolMessage(
                             content=f"工具调用失败: {e}",
@@ -169,9 +198,11 @@ async def searcher_agent(state: dict, config: RunnableConfig) -> dict[str, Any]:
                     )
                 )
 
-    # ── 整理搜索结果（区分来源） ───────────────────────────────
+    # ── 整理搜索结果（区分来源，过滤失败文本） ─────────────────
     search_results: list[dict[str, Any]] = []
     for item in all_search_results:
+        if _is_tool_failure(item.get("result", "")):
+            continue
         source = item.get("source", "web")
         search_results.append(
             {
@@ -181,6 +212,49 @@ async def searcher_agent(state: dict, config: RunnableConfig) -> dict[str, Any]:
                 "timestamp": timestamp,
             }
         )
+
+    # ── 空结果兜底：强制按主题走一轮 ArXiv，避免 Tavily 失效/检索落空导致整条链路失败 ──
+    if not search_results:
+        fallback_query = topic
+        try:
+            from backend.tools.arxiv_tool import arxiv_search
+
+            await report_progress(config, f"🛠 兜底 arxiv_search：{fallback_query}")
+            raw = await asyncio.to_thread(arxiv_search.invoke, {"query": fallback_query})
+            text = str(raw or "").strip()
+            if text and "未找到" not in text and "失败" not in text and not _is_tool_failure(text):
+                all_search_results.append(
+                    {"query": fallback_query, "result": text, "source": "arxiv"}
+                )
+                search_results.append(
+                    {
+                        "query": fallback_query,
+                        "content": text,
+                        "source": "arxiv",
+                        "timestamp": timestamp,
+                    }
+                )
+                logger.info("搜索为空，已用 ArXiv 主题兜底补救")
+            else:
+                logger.warning(f"ArXiv 兜底仍无结果: {text[:200]}")
+                tool_failures.append(f"arxiv_fallback: {text[:120] if text else 'empty'}")
+        except Exception as e:
+            logger.error(f"ArXiv 兜底失败: {e}")
+            tool_failures.append(f"arxiv_fallback: {e}")
+
+    # ── 仍无有效文献 → 进入 failed，不再假装进入分析/审核 ──────
+    if not search_results:
+        fail_detail = "；".join(tool_failures[-3:]) if tool_failures else "检索策略未返回有效文献"
+        err = f"检索失败，未获得有效文献。{fail_detail}"
+        logger.error(err)
+        await report_progress(config, f"❌ {err}")
+        return {
+            "search_results": [],
+            "current_phase": "failed",
+            "references": [],
+            "report_draft": f"# {topic}\n\n> 任务失败：{err}",
+            "messages": [HumanMessage(content=err)],
+        }
 
     logger.info(f"搜索员完成工作，共 {len(search_results)} 条搜索结果")
 
@@ -199,15 +273,15 @@ async def searcher_agent(state: dict, config: RunnableConfig) -> dict[str, Any]:
     except Exception as e:
         logger.warning(f"向量数据库存储失败（不影响主流程）: {e}")
 
-    # ── 构建引用条目 ───────────────────────────────────────────
+    # ── 构建引用条目（仅有效结果） ─────────────────────────────
     references: list[dict[str, Any]] = []
     ref_id = 1
-    for item in all_search_results:
+    for item in search_results:
         references.append({
             "id": ref_id,
             "title": item.get("query", "未知来源"),
-            "url": "",  # 如果有 URL 则填入
-            "source": item.get("source", "tavily"),
+            "url": "",
+            "source": item.get("source", "web"),
             "date": "",
         })
         ref_id += 1

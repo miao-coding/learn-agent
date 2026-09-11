@@ -22,6 +22,7 @@ from backend.api.schemas import (
     AdminTestRequest,
     AdminTestResponse,
     AvailableModelsResponse,
+    DeleteResponse,
     HealthResponse,
     HistoryItem,
     ReportResponse,
@@ -148,16 +149,21 @@ async def _run_graph(
 
 
 async def _finalize_stream(graph: Any, config: dict, queue: asyncio.Queue) -> None:
-    """图流结束后的收尾：区分「等待人工审核」与「真正完成」
+    """图流结束后的收尾：区分「等待人工审核 / 失败 / 真正完成」
 
     update_state 审核模式下，reviewer 之后图会正常 END；此时通过
-    aget_state 检查最终阶段：等待审核时不推送 completed（避免前端
-    误标记任务完成），仅结束本次 SSE 流。
+    aget_state 检查最终阶段：
+    - reviewing：不推送 completed，仅结束 SSE
+    - failed：推送 phase=failed（禁止伪装成 completed）
+    - 其他：completed
     """
     snap = await graph.aget_state(config)
     final_phase = (snap.values or {}).get("current_phase", "") if snap else ""
     if final_phase == "reviewing":
         # interrupt 审核事件已在 _handle_update_event 中推送
+        await queue.put({"event": "done", "data": ""})
+    elif final_phase == "failed":
+        await queue.put({"event": "phase", "data": {"phase": "failed"}})
         await queue.put({"event": "done", "data": ""})
     else:
         await queue.put({"event": "phase", "data": {"phase": "completed"}})
@@ -174,10 +180,22 @@ async def _handle_update_event(
         if not isinstance(state_update, dict):
             continue
 
-        # 发送阶段变更事件
-        phase = NODE_PHASE_MAP.get(node_name)
-        if phase:
-            await queue.put({"event": "phase", "data": {"phase": phase}})
+        # 阶段事件：优先用节点写入的 current_phase（含 failed），避免线性边把失败点亮成 reviewing/completed
+        node_phase = NODE_PHASE_MAP.get(node_name)
+        emitted_phase = state_update.get("current_phase") or ""
+        if emitted_phase == "failed":
+            await queue.put({"event": "phase", "data": {"phase": "failed"}})
+            await queue.put({
+                "event": "error",
+                "data": {
+                    "message": state_update.get("report_draft", "")
+                    or "任务失败（检索或生成未完成）",
+                },
+            })
+        elif emitted_phase and emitted_phase not in ("", "init"):
+            await queue.put({"event": "phase", "data": {"phase": emitted_phase}})
+        elif node_phase:
+            await queue.put({"event": "phase", "data": {"phase": node_phase}})
 
         # 审核等待：reviewer 完成后图正常 END，推送审核请求
         # （update_state 审核模式，前端协议沿用 interrupt 事件）
@@ -193,7 +211,7 @@ async def _handle_update_event(
 
         # 发送进度信息（中间输出）
         current_phase = state_update.get("current_phase", "")
-        if current_phase:
+        if current_phase and current_phase != "failed":
             progress_msg = _build_progress_message(node_name, current_phase, state_update)
             if progress_msg:
                 await queue.put({"event": "progress", "data": {"message": progress_msg}})
@@ -313,7 +331,10 @@ async def submit_review(request: Request, thread_id: str, body: ReviewRequest):
         raise HTTPException(status_code=404, detail="Task not found")
 
     values = snap.values
-    if values.get("current_phase") not in ("reviewing", "writing"):
+    phase = values.get("current_phase")
+    if phase == "failed":
+        raise HTTPException(status_code=400, detail="任务已失败，无法审核；请删除后重新提交研究")
+    if phase not in ("reviewing", "writing"):
         raise HTTPException(status_code=400, detail="当前状态不可审核（任务未就绪或已完成）")
 
     feedback = body.feedback.strip()
@@ -450,12 +471,15 @@ async def get_report(request: Request, thread_id: str):
             raise HTTPException(status_code=404, detail="Task not found")
 
         values = state.values
-        final_report = values.get("final_report", "")
+        final_report = values.get("final_report", "") or values.get("report_draft", "")
         topic = values.get("topic", "")
         current_phase = values.get("current_phase", "")
 
-        if not final_report:
+        if not final_report and current_phase != "failed":
             raise HTTPException(status_code=404, detail="Report not ready yet")
+
+        if not final_report and current_phase == "failed":
+            final_report = f"# {topic}\n\n> 任务失败"
 
         return ReportResponse(
             thread_id=thread_id,
@@ -673,6 +697,78 @@ async def list_history(request: Request, limit: int = 20):
             continue
 
     return items
+
+
+async def _delete_thread_from_checkpoints(thread_id: str) -> int:
+    """从 checkpoints.db 删除指定 thread 的全部持久化记录，返回删除行数"""
+    import aiosqlite
+
+    from backend.graph.checkpointer import DB_PATH
+
+    deleted = 0
+    async with aiosqlite.connect(DB_PATH) as db:
+        # 动态发现带 thread_id 列的表，兼容不同 langgraph-checkpoint 版本
+        async with db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ) as cur:
+            tables = [r[0] for r in await cur.fetchall()]
+
+        for table in tables:
+            try:
+                async with db.execute(f"PRAGMA table_info({table})") as cur:
+                    cols = [r[1] for r in await cur.fetchall()]
+            except Exception:
+                continue
+            if "thread_id" not in cols:
+                continue
+            try:
+                async with db.execute(
+                    f"DELETE FROM {table} WHERE thread_id = ?", (thread_id,)
+                ) as cur:
+                    deleted += cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+            except Exception as e:
+                logger.warning(f"删除表 {table} 中 thread {thread_id} 失败: {e}")
+
+        await db.commit()
+    return deleted
+
+
+@router.delete("/research/{thread_id}", response_model=DeleteResponse)
+async def delete_research(thread_id: str, request: Request):
+    """手动删除研究报告 / 历史任务（含 checkpoints 持久化数据）
+
+    用于前端历史列表的删除按钮；正在运行的任务会先从活跃队列摘除。
+    """
+    if not thread_id or len(thread_id) > 128:
+        raise HTTPException(status_code=400, detail="无效的 thread_id")
+
+    # 从活跃 SSE 队列摘除（运行中任务删除后不再推送）
+    active_tasks.pop(thread_id, None)
+    try:
+        progress_bus.unregister(thread_id)
+    except Exception:
+        pass
+
+    try:
+        deleted = await _delete_thread_from_checkpoints(thread_id)
+    except Exception as e:
+        logger.exception(f"删除任务 {thread_id} 失败")
+        raise HTTPException(status_code=500, detail=str(e))
+
+    if deleted <= 0:
+        # 可能本来就没有记录，仍返回成功，避免前端二次确认困扰
+        return DeleteResponse(
+            thread_id=thread_id,
+            deleted=True,
+            message="任务不存在或已删除",
+        )
+
+    logger.info(f"已删除研究任务 {thread_id}，清理 {deleted} 行持久化数据")
+    return DeleteResponse(
+        thread_id=thread_id,
+        deleted=True,
+        message=f"已删除（清理 {deleted} 条记录）",
+    )
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
