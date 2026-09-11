@@ -1,0 +1,54 @@
+# 环境变量
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
+
+# 虚拟环境
+.venv/
+venv/
+env/
+
+# 数据库文件
+*.db
+*.sqlite
+*.sqlite3
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 操作系统
+.DS_Store
+Thumbs.db
+
+# 日志
+*.log
+
+# ChromaDB 向量数据库
+output/chroma_db/
+
+# 子项目（另行管理）
+file_management/
+
+# 打包与部署产物
+deploy_bundle.tar.gz
+*.zip
+*.tar.gz
+
+# 测试缓存
+.pytest_cache/
+
+# deploy 目录仅保留正式工具；本地临时调试脚本可能含凭据，一律不入库
+deploy/*.py
+!deploy/remote_deploy.py
+!deploy/remote_exec.py

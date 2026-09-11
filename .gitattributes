@@ -1,0 +1,7 @@
+# 统一行尾：shell 脚本必须是 LF（CRLF 会导致 bash 报 invalid option name）
+*.sh text eol=lf
+*.py text eol=lf
+*.md text eol=lf
+*.txt text eol=lf
+*.ini text eol=lf
+*.example text eol=lf

@@ -1,0 +1,37 @@
+# 核心框架
+langchain>=0.3
+langgraph>=1.1
+langchain-openai>=0.3
+langgraph-checkpoint-sqlite
+
+# Web 框架
+fastapi>=0.135.0
+uvicorn[standard]
+streamlit>=1.30
+
+# 搜索工具
+tavily-python
+
+# 学术检索（4.x 移除了 Result.download_pdf/pdf_url，代码已兼容 2.x/4.x）
+arxiv>=2.0,<6
+pymupdf
+
+# 工具
+pydantic-settings
+python-dotenv
+httpx
+requests
+
+# 数据可视化
+matplotlib
+pandas
+numpy
+
+# RAG
+chromadb
+
+# 测试
+pytest
+pytest-asyncio
+pytest-cov
+httpx
