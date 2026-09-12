@@ -817,6 +817,9 @@ async def get_dependencies():
         wikipedia_enabled=True,
         semantic_scholar_enabled=True,
         openalex_enabled=True,
+        crossref_enabled=True,
+        europepmc_enabled=True,
+        core_enabled=True,
         searxng_url=searx_url,
         searxng_reachable=searx_ok,
     )

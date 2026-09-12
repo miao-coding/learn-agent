@@ -23,10 +23,15 @@ from langchain_openai import ChatOpenAI
 from backend.config import settings
 from backend.tools.search import tavily_search, tavily_extract
 from backend.tools.arxiv_tool import arxiv_search, arxiv_download
+from backend.tools.lit_sources import (
+    academic_fallback_search,
+    core_search,
+    crossref_search,
+    europepmc_search,
+    openalex_search,
+)
 from backend.tools.web_search_free import (
     duckduckgo_search,
-    openalex_search,
-    semantic_scholar_search,
     searxng_search,
     wikipedia_search,
 )
@@ -53,30 +58,25 @@ def _is_tool_failure(result: str) -> bool:
 
 
 # ── 搜索员系统提示词 ─────────────────────────────────────────────
-SEARCHER_SYSTEM_PROMPT = """你是一个专业的学术文献检索员。你的任务是根据给定的研究方向，进行高效的文献检索，收集相关学术论文和研究资料。
+SEARCHER_SYSTEM_PROMPT = """你是一个专业的学术文献检索员。你的任务是根据给定的研究方向，收集**真实、可溯源**的学术文献。
 
-可用检索工具（按优先级）：
-1. arxiv_search — 学术论文主源（有限流，少而精，2-3 次足够）
-2. semantic_scholar_search / openalex_search — 学术补充（引用数、元数据，无需 Key）
-3. duckduckgo_search / wikipedia_search — 网页与百科补充（无需 Key）
-4. searxng_search — 本地元搜索（若可用）
-5. tavily_search — 商业网页搜索（可能无 Key 失败，失败勿反复重试）
+## 推荐检索策略（按优先级）
 
-工作要求：
-1. 先用 1-2 条 arxiv_search 覆盖综述与核心方法
-2. Tavily 失败时立刻改用 duckduckgo_search / semantic_scholar_search，不要空转
-3. 同一查询不要重复发送
-4. 整理结果并标明来源（arxiv / web / scholar / wiki / searxng）
+1. **先调用 academic_fallback_search**（自动依次尝试 Crossref → OpenAlex → EuropePMC → CORE，无需 Key，服务器实测稳定）
+2. 再用 **arxiv_search** 补 1-2 条预印本/最新工作（有限流，勿重复同 query）
+3. 需要补充时用 **crossref_search / openalex_search** 精确加搜（如再搜一次 survey/review）
+4. 网页类工具（tavily / duckduckgo / wikipedia / searxng）在本环境可能不可用，**不要把它们当主源**；失败一次就切换，不要反复重试
 
-输出格式：
-- 每条结果包含：标题、来源URL、关键内容摘要
-- 按重要性排序
-- 区分学术来源与网络来源
+## 工作要求
 
-检索策略：
-- 先宽后深：survey + 1-2 个具体方法词
-- arxiv_download 仅在摘要不足时用，整个任务最多 1 篇
-- 若工具返回「限流」「429」或「冷却」，停止继续调用该源，换其它源或用已有结果总结"""
+- 生成 **2-3 个**不同角度查询即可（综述 survey/review + 核心方法名 + 1 个具体技术词）
+- **禁止重复发送相同 query**
+- 优先收录：高被引综述、里程碑工作、SOTA 方法
+- arxiv_download 整个任务最多 1 篇；摘要通常已足够
+- 结果整理时标明来源库（crossref/openalex/europepmc/core/arxiv）
+- 若返回「限流/429/冷却/失败」，停止该源，换下一源或用已有结果总结
+
+目标：至少收集 6 条以上带标题与链接的真实文献，供撰稿引用。"""
 
 
 async def searcher_agent(state: dict, config: RunnableConfig) -> dict[str, Any]:
@@ -109,14 +109,17 @@ async def searcher_agent(state: dict, config: RunnableConfig) -> dict[str, Any]:
         temperature=0.1,
     )
     tools = [
-        tavily_search,
-        tavily_extract,
+        academic_fallback_search,
+        crossref_search,
+        openalex_search,
+        europepmc_search,
+        core_search,
         arxiv_search,
         arxiv_download,
+        tavily_search,
+        tavily_extract,
         duckduckgo_search,
         wikipedia_search,
-        semantic_scholar_search,
-        openalex_search,
         searxng_search,
     ]
     llm_with_tools = llm.bind_tools(tools)
@@ -224,6 +227,10 @@ async def searcher_agent(state: dict, config: RunnableConfig) -> dict[str, Any]:
                         "semantic_scholar_search": "scholar",
                         "openalex_search": "scholar",
                         "searxng_search": "web",
+                        "crossref_search": "scholar",
+                        "europepmc_search": "scholar",
+                        "core_search": "scholar",
+                        "academic_fallback_search": "scholar",
                     }
                     if tool_name in source_map:
                         qfield = "paper_id" if tool_name == "arxiv_download" else "query"

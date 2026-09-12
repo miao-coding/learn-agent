@@ -149,5 +149,8 @@ class DependenciesResponse(BaseModel):
     wikipedia_enabled: bool = True
     semantic_scholar_enabled: bool = True
     openalex_enabled: bool = True
+    crossref_enabled: bool = True
+    europepmc_enabled: bool = True
+    core_enabled: bool = True
     searxng_url: str = ""
     searxng_reachable: bool = False

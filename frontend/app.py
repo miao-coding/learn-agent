@@ -819,7 +819,18 @@ def render_sidebar():
                 if deps.get("llm_base_url"):
                     st.caption(f"接口：`{deps.get('llm_base_url')}`")
                 st.caption("ArXiv：✅ 默认可用（国内 PDF 可能超时）")
-                # 免 Key 补充源
+                # 免 Key 学术主源（服务器实测优先）
+                acad = []
+                if deps.get("crossref_enabled"):
+                    acad.append("Crossref")
+                if deps.get("openalex_enabled"):
+                    acad.append("OpenAlex")
+                if deps.get("europepmc_enabled"):
+                    acad.append("EuropePMC")
+                if deps.get("core_enabled"):
+                    acad.append("CORE")
+                if acad:
+                    st.caption("学术主源：✅ " + "、".join(acad))
                 free_parts = []
                 if deps.get("duckduckgo_enabled"):
                     free_parts.append("DuckDuckGo")
@@ -827,10 +838,8 @@ def render_sidebar():
                     free_parts.append("Wikipedia")
                 if deps.get("semantic_scholar_enabled"):
                     free_parts.append("Semantic Scholar")
-                if deps.get("openalex_enabled"):
-                    free_parts.append("OpenAlex")
                 if free_parts:
-                    st.caption("免 Key 源：" + "、".join(free_parts))
+                    st.caption("其它免 Key 源：" + "、".join(free_parts) + "（部分环境可能不可达）")
                 if deps.get("searxng_reachable"):
                     st.caption(f"自建 SearXNG：✅ `{deps.get('searxng_url')}`")
                 else:
