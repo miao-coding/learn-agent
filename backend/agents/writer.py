@@ -55,6 +55,10 @@ RAG 检索能力：你可以使用 rag_search 工具从向量数据库中检索�
 - 禁止输出“已核实完毕/以下是报告/修正后重新输出”等过程说明
 - 禁止把同一份报告重贴多遍；若需修改，只输出一份最终完整报告
 - 禁止重复“参考文献”章节
+- **引用必须真实**：只能使用下方「引用来源列表」中已有的编号 [1]..[N]
+- **禁止编造**列表之外的编号，禁止发明不存在的论文标题/作者/年份
+- 若某论断没有对应文献，宁可写“相关公开资料显示/概括性表述”，也不要编造 [n]
+- 末尾「参考文献」只列出你实际用到的、且在提供列表中的编号
 """
 
 
@@ -225,17 +229,17 @@ async def writer_agent(state: dict) -> dict[str, Any]:
             "messages": [HumanMessage(content=f"撰稿人调用失败: {e}")],
         }
 
-    # ── 正文引用编号与文献列表对账（P1）────────────────────────
+    # ── 正文引用编号与文献列表对账（只保留真实文献）────────────
     from backend.utils.citations import reconcile_references
 
-    reconciled_refs, cite_issues = reconcile_references(report_draft, references)
+    report_draft, real_refs, cite_issues = reconcile_references(report_draft, references)
     if cite_issues:
-        logger.warning(f"引用对账问题: {cite_issues}")
+        logger.warning(f"引用对账: {cite_issues}")
 
     return {
         "report_draft": report_draft,
         "current_phase": "reviewing",
-        "references": reconciled_refs,
+        "references": real_refs,
         "messages": [msg],
     }
 

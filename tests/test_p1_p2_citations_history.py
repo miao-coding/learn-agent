@@ -32,19 +32,23 @@ class TestReconcile:
     def test_parse_citations(self):
         assert parse_body_citations("方法 [1][3] 与 [10-2] 以及 [23]") == [1, 3, 10, 23]
 
-    def test_missing_id_gets_placeholder(self):
-        report = "# T\n\n内容 [2]\n"
+    def test_fabricated_id_is_stripped_not_placeholder(self):
+        report = "# T\n\n内容 [2] 真实 [1]\n"
         refs = [{"id": 1, "title": "only one", "url": "", "source": "arxiv", "date": ""}]
-        new_refs, issues = reconcile_references(report, refs)
-        assert any(r["id"] == 2 for r in new_refs)
-        assert any("[2]" in i for i in issues)
+        cleaned, new_refs, issues = reconcile_references(report, refs)
+        body = cleaned.split("## 参考文献")[0]
+        assert "[2]" not in body
+        assert "[1]" in body
+        assert all(r["id"] == 1 for r in new_refs)
+        assert not any("未命名" in str(r.get("title")) for r in new_refs)
 
-    def test_no_missing_when_aligned(self):
+    def test_no_fabrication_when_aligned(self):
         report = "# T\n\n内容 [1]\n"
         refs = [{"id": 1, "title": "a", "url": "u", "source": "arxiv", "date": ""}]
-        new_refs, issues = reconcile_references(report, refs)
+        cleaned, new_refs, issues = reconcile_references(report, refs)
         assert len(new_refs) == 1
-        assert not any("不在文献列表" in i for i in issues)
+        assert "## 参考文献" in cleaned
+        assert "未命名" not in cleaned
 
 
 class TestCheckpointTime:

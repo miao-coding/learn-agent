@@ -110,18 +110,18 @@ def wikipedia_search(query: str, max_results: int = 3) -> str:
 
 
 @tool
-def semantic_scholar_search(query: str, max_results: int = 5) -> str:
+def semantic_scholar_search(query: str, max_results: int = 8) -> str:
     """Semantic Scholar 学术搜索（无需 API Key）。返回标题、年份、引用数、摘要与链接。
 
     Args:
         query: 研究主题英文关键词
-        max_results: 返回论文数，默认 5
+        max_results: 返回论文数，默认 8
     """
     q = (query or "").strip()
     if not q:
         return "错误：查询为空"
     try:
-        max_results = max(1, min(int(max_results or 5), 10))
+        max_results = max(1, min(int(max_results or 8), 15))
         url = "https://api.semanticscholar.org/graph/v1/paper/search"
         resp = requests.get(
             url,
@@ -170,18 +170,18 @@ def semantic_scholar_search(query: str, max_results: int = 5) -> str:
 
 
 @tool
-def openalex_search(query: str, max_results: int = 5) -> str:
+def openalex_search(query: str, max_results: int = 8) -> str:
     """OpenAlex 开放学术检索（无需 API Key）。返回标题、年份、被引、来源期刊与链接。
 
     Args:
         query: 研究主题关键词
-        max_results: 返回条数，默认 5
+        max_results: 返回条数，默认 8
     """
     q = (query or "").strip()
     if not q:
         return "错误：查询为空"
     try:
-        max_results = max(1, min(int(max_results or 5), 10))
+        max_results = max(1, min(int(max_results or 8), 15))
         resp = requests.get(
             "https://api.openalex.org/works",
             params={"search": q, "per-page": max_results},
