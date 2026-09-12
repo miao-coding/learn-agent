@@ -46,28 +46,24 @@ def _is_tool_failure(result: str) -> bool:
 
 
 # ── 搜索员系统提示词 ─────────────────────────────────────────────
-SEARCHER_SYSTEM_PROMPT = """你是一个专业的学术文献检索员。你的任务是根据给定的研究方向，进行全面的文献检索，收集相关学术论文和研究资料。
+SEARCHER_SYSTEM_PROMPT = """你是一个专业的学术文献检索员。你的任务是根据给定的研究方向，进行高效的文献检索，收集相关学术论文和研究资料。
 
 工作要求：
-1. 根据研究方向生成 3-5 个不同角度的检索查询（如综述类关键词 survey/review、核心方法名、技术路线、经典工作与最新进展等）
-2. 优先使用 arxiv_search 检索学术论文。**摘要信息通常已足够综述分析**——仅当某篇论文确属里程碑工作且摘要明显不足时才用 arxiv_download 下载全文，整个任务最多下载 1-2 篇（PDF 下载耗时很长，频繁下载会严重拖慢任务）
-3. 使用 tavily_search 辅助检索：知名研究团队/实验室、顶会论文信息、开源项目与基准数据集（benchmark）
-4. 从搜索结果中选择最有价值的页面，使用 tavily_extract 获取详细内容
-5. 整理所有检索结果，确保包含来源信息
+1. 根据研究方向生成 **2-3 个**不同角度的检索查询（综述类 survey/review、核心方法名各一条即可；不要发散过多相似 query）
+2. 优先使用 arxiv_search。**同一查询不要重复发送**；ArXiv 有限流，尽量少而精
+3. tavily_search 失败时不要反复重试，直接依赖 arxiv_search
+4. 整理所有检索结果，确保包含来源信息
 
 输出格式：
 - 每条结果包含：标题、来源URL、关键内容摘要
 - 按重要性排序
-- 标注数据来源URL
 - 明确区分学术论文结果（arxiv/arxiv_pdf）和网络补充资料（web）
-- 最终总结中需分别列出学术来源和网络来源
 
-注意：检索要全面、多角度，覆盖研究方向的各个维度。
 检索策略：
-- 先用宽泛查询摸清领域全貌，再用具体方法名/技术词深挖
-- 优先收录：高引综述、里程碑工作、SOTA 方法、基准数据集论文
-- 覆盖不同年份的代表工作，体现领域发展脉络
-- arxiv_download 谨慎使用：摘要优先，最多下载 1-2 篇核心论文全文，避免在下载上浪费时间"""
+- 先宽后深：一个宽泛 survey 查询 + 1-2 个具体方法/技术词查询即可
+- 优先收录：高引综述、里程碑工作、SOTA 方法
+- arxiv_download 仅在摘要明显不足时使用，整个任务最多 1 篇
+- 若工具返回「限流」「429」或「冷却」，停止继续调用 ArXiv，用已有结果总结"""
 
 
 async def searcher_agent(state: dict, config: RunnableConfig) -> dict[str, Any]:
@@ -109,12 +105,15 @@ async def searcher_agent(state: dict, config: RunnableConfig) -> dict[str, Any]:
         HumanMessage(content=f"请围绕以下研究方向进行全面文献检索：{topic}"),
     ]
 
-    # ── 工具调用循环（最多 10 轮） ─────────────────────────────
+    # ── 工具调用循环（最多 6 轮，降低 ArXiv 压力） ─────────────
     all_search_results: list[dict[str, Any]] = []
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     tool_failures: list[str] = []
+    seen_arxiv_queries: set[str] = set()
+    arxiv_call_budget = 4
+    arxiv_downloaded = 0
 
-    for i in range(10):
+    for i in range(6):
         logger.debug(f"搜索员第 {i + 1} 轮工具调用")
         await report_progress(config, f"🔎 检索员第 {i + 1} 轮：正在决策检索策略...")
         try:
@@ -138,9 +137,44 @@ async def searcher_agent(state: dict, config: RunnableConfig) -> dict[str, Any]:
             logger.info(f"调用工具: {tool_name}, 参数: {tool_args}")
 
             if tool_name in tool_map:
-                # 工具级实时进度：让用户看到每一步在做什么
                 _arg_hint = tool_args.get("query") or tool_args.get("paper_id") or tool_args.get("urls") or ""
                 await report_progress(config, f"🛠 调用 {tool_name}：{_arg_hint}")
+
+                # ArXiv 去重 + 预算，避免同一 query 反复 429
+                if tool_name == "arxiv_search":
+                    qkey = str(tool_args.get("query", "")).strip().lower()
+                    if qkey in seen_arxiv_queries:
+                        await report_progress(config, f"⏭ 跳过重复 arxiv_search：{_arg_hint}")
+                        messages.append(
+                            ToolMessage(
+                                content="查询与之前相同，已跳过（请换角度或结束检索）",
+                                tool_call_id=tool_call["id"],
+                            )
+                        )
+                        continue
+                    if arxiv_call_budget <= 0:
+                        await report_progress(config, "⏭ 本任务 ArXiv 查询次数已用尽，跳过")
+                        messages.append(
+                            ToolMessage(
+                                content="本任务 ArXiv 查询预算已用尽，请基于已有结果总结",
+                                tool_call_id=tool_call["id"],
+                            )
+                        )
+                        continue
+                    seen_arxiv_queries.add(qkey)
+                    arxiv_call_budget -= 1
+
+                if tool_name == "arxiv_download":
+                    if arxiv_downloaded >= 1:
+                        messages.append(
+                            ToolMessage(
+                                content="本任务最多下载 1 篇全文，请使用已有摘要",
+                                tool_call_id=tool_call["id"],
+                            )
+                        )
+                        continue
+                    arxiv_downloaded += 1
+
                 try:
                     # 同步工具放线程池执行，避免阻塞事件循环
                     result = await asyncio.to_thread(tool_map[tool_name].invoke, tool_args)
@@ -153,6 +187,9 @@ async def searcher_agent(state: dict, config: RunnableConfig) -> dict[str, Any]:
                         fail_hint = result_text.strip().splitlines()[0][:120] if result_text.strip() else "未知错误"
                         tool_failures.append(f"{tool_name}: {fail_hint}")
                         await report_progress(config, f"⚠️ {tool_name} 失败：{fail_hint}")
+                        # ArXiv 429：停止后续 ArXiv 调用
+                        if "429" in result_text or "限流" in result_text or "冷却" in result_text:
+                            arxiv_call_budget = 0
                         continue
                     # 记录搜索结果
                     if tool_name == "tavily_search":
