@@ -3,8 +3,10 @@ import glob
 import json
 import time
 
+import markdown as md_lib
 import requests
 import streamlit as st
+import streamlit.components.v1 as components
 from pathlib import Path
 
 # ============ 页面配置 ============
@@ -16,6 +18,137 @@ st.set_page_config(
 
 # ============ 常量 ============
 API_BASE_URL = "http://localhost:8000"
+
+# 内嵌 Markdown 报告样式（论文阅读感）
+_REPORT_CSS = """
+<style>
+.report-md {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+               "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  font-size: 15px;
+  line-height: 1.75;
+  color: #1a1a1a;
+  max-width: 920px;
+  margin: 0 auto;
+  padding: 8px 4px 32px;
+}
+.report-md h1 {
+  font-size: 1.65rem;
+  font-weight: 700;
+  border-bottom: 2px solid #e8e8e8;
+  padding-bottom: 0.4rem;
+  margin: 1.2rem 0 1rem;
+}
+.report-md h2 {
+  font-size: 1.3rem;
+  font-weight: 650;
+  margin: 1.6rem 0 0.7rem;
+  padding-left: 0.55rem;
+  border-left: 4px solid #2b6cb0;
+}
+.report-md h3 {
+  font-size: 1.1rem;
+  font-weight: 600;
+  margin: 1.2rem 0 0.5rem;
+  color: #2d3748;
+}
+.report-md h4, .report-md h5 {
+  font-size: 1rem;
+  font-weight: 600;
+  margin: 1rem 0 0.4rem;
+}
+.report-md p { margin: 0.55rem 0; }
+.report-md ul, .report-md ol { padding-left: 1.4rem; margin: 0.5rem 0; }
+.report-md li { margin: 0.25rem 0; }
+.report-md blockquote {
+  margin: 0.8rem 0;
+  padding: 0.6rem 1rem;
+  border-left: 4px solid #cbd5e0;
+  background: #f7fafc;
+  color: #4a5568;
+  border-radius: 0 6px 6px 0;
+}
+.report-md table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 1rem 0;
+  font-size: 0.92rem;
+  display: block;
+  overflow-x: auto;
+}
+.report-md th, .report-md td {
+  border: 1px solid #e2e8f0;
+  padding: 0.5rem 0.75rem;
+  text-align: left;
+  vertical-align: top;
+}
+.report-md th {
+  background: #edf2f7;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.report-md tr:nth-child(even) td { background: #fafafa; }
+.report-md code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.88em;
+  background: #f1f5f9;
+  padding: 0.12em 0.35em;
+  border-radius: 4px;
+}
+.report-md pre {
+  background: #0f172a;
+  color: #e2e8f0;
+  padding: 0.9rem 1rem;
+  border-radius: 8px;
+  overflow-x: auto;
+  margin: 0.8rem 0;
+}
+.report-md pre code { background: transparent; color: inherit; padding: 0; }
+.report-md a { color: #2b6cb0; text-decoration: none; }
+.report-md a:hover { text-decoration: underline; }
+.report-md hr {
+  border: none;
+  border-top: 1px solid #e2e8f0;
+  margin: 1.5rem 0;
+}
+.report-md img { max-width: 100%; border-radius: 6px; }
+/* 引用编号 [1] 轻微高亮 */
+.report-md em:empty { display: none; }
+</style>
+"""
+
+
+def render_embedded_markdown(md_text: str, *, min_height: int = 520, max_height: int = 1400) -> None:
+    """把 Markdown 内嵌渲染为带样式的 HTML 阅读区（表格/代码/标题层级更完整）"""
+    if not md_text or not str(md_text).strip():
+        st.info("暂无内容")
+        return
+
+    body_html = md_lib.markdown(
+        str(md_text),
+        extensions=[
+            "tables",
+            "fenced_code",
+            "sane_lists",
+            "nl2br",
+            "smarty",
+        ],
+        output_format="html5",
+    )
+    # 粗略按字符估算高度，限制在 [min, max]
+    est = 480 + len(str(md_text)) // 18
+    height = max(min_height, min(max_height, est))
+
+    html_doc = f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+{_REPORT_CSS}
+</head>
+<body>
+<article class="report-md">
+{body_html}
+</article>
+</body></html>"""
+    components.html(html_doc, height=height, scrolling=True)
 
 # ============ Session State 初始化 ============
 def init_session_state():
@@ -825,7 +958,8 @@ def render_report_section():
                         st.markdown(f"- [{title}](#{anchor})")
                     st.divider()
 
-            st.markdown(report, unsafe_allow_html=True)
+            # 内嵌 Markdown 阅读区（表格/代码块/层级标题完整渲染）
+            render_embedded_markdown(report)
 
             # 下载按钮
             st.divider()
@@ -846,7 +980,7 @@ def render_report_section():
     elif draft:
         # 审核中的草稿
         st.info("📋 以下是报告草稿，请审核后决定是否通过：")
-        st.markdown(draft, unsafe_allow_html=True)
+        render_embedded_markdown(draft)
 
 
 def _extract_toc(report: str) -> list[tuple[str, str]]:
