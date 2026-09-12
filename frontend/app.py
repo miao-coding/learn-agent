@@ -626,6 +626,152 @@ def render_header():
     st.divider()
 
 
+def _render_admin_settings(admin_status: dict) -> None:
+    """系统设置：状态卡片 + 分组表单 + 操作按钮（侧边栏内布局）"""
+    llm_ok = bool(admin_status.get("openai_key_set"))
+    tavily_ok = bool(admin_status.get("tavily_key_set"))
+    model_name = admin_status.get("model_name") or "-"
+
+    st.markdown("##### 当前状态")
+    c1, c2, c3 = st.columns(3)
+    c1.markdown(
+        f"<div style='text-align:center;padding:8px 4px;border-radius:8px;"
+        f"background:{'#e6f4ea' if llm_ok else '#fce8e6'}'>"
+        f"<div style='font-size:1.1rem'>{'✅' if llm_ok else '❌'}</div>"
+        f"<div style='font-size:0.75rem;color:#555'>LLM Key</div></div>",
+        unsafe_allow_html=True,
+    )
+    c2.markdown(
+        f"<div style='text-align:center;padding:8px 4px;border-radius:8px;"
+        f"background:{'#e6f4ea' if tavily_ok else '#fce8e6'}'>"
+        f"<div style='font-size:1.1rem'>{'✅' if tavily_ok else '❌'}</div>"
+        f"<div style='font-size:0.75rem;color:#555'>Tavily</div></div>",
+        unsafe_allow_html=True,
+    )
+    c3.markdown(
+        f"<div style='text-align:center;padding:8px 4px;border-radius:8px;"
+        f"background:#e8f0fe'>"
+        f"<div style='font-size:0.85rem;font-weight:600'>{model_name[:18]}</div>"
+        f"<div style='font-size:0.75rem;color:#555'>默认模型</div></div>",
+        unsafe_allow_html=True,
+    )
+
+    if admin_status.get("openai_base_url"):
+        st.caption(f"接口地址：`{admin_status.get('openai_base_url')}`")
+
+    st.markdown("##### 修改配置")
+    st.caption("密钥与接口留空表示不修改；保存后即时生效并写入服务器 `.env`。")
+
+    with st.form("admin_config_form", clear_on_submit=False):
+        admin_pwd = st.text_input(
+            "管理员口令",
+            type="password",
+            placeholder="服务器 ADMIN_PASSWORD",
+            help="防误改：所有操作均需校验口令",
+        )
+
+        st.markdown("**模型接口**")
+        col_url, col_model = st.columns(2)
+        with col_url:
+            new_base_url = st.text_input(
+                "BASE_URL",
+                placeholder="https://open.bigmodel.cn/api/coding/paas/v4",
+                help="OpenAI 兼容接口地址",
+            )
+        with col_model:
+            new_model = st.text_input(
+                "默认模型",
+                placeholder=st.session_state.get("_ph_model") or "glm-5.3-flash",
+                help="接口内的模型名",
+            )
+        new_openai_key = st.text_input(
+            "API Key",
+            type="password",
+            placeholder="sk-... / 智谱 Key",
+        )
+
+        st.markdown("**检索服务**")
+        new_tavily_key = st.text_input(
+            "Tavily Key",
+            type="password",
+            placeholder="tvly-...",
+            help="用于网络补充检索；无效时系统自动仅走 ArXiv",
+        )
+
+        st.markdown("**操作**")
+        b1, b2, b3 = st.columns(3)
+        with b1:
+            fetch_clicked = st.form_submit_button("📋 获取模型", use_container_width=True)
+        with b2:
+            test_clicked = st.form_submit_button("🔌 测试连接", use_container_width=True)
+        with b3:
+            save_clicked = st.form_submit_button("💾 保存", use_container_width=True)
+
+    if fetch_clicked:
+        if not admin_pwd:
+            st.error("请输入管理员口令")
+        else:
+            with st.spinner("正在获取模型列表..."):
+                result = admin_list_models({
+                    "password": admin_pwd,
+                    "openai_api_key": new_openai_key or None,
+                    "openai_base_url": new_base_url or None,
+                })
+            if result is None:
+                st.error("获取失败：后端异常")
+            elif result.get("error"):
+                st.error(f"获取失败：{result['error']}")
+            else:
+                models = result.get("models", [])
+                st.session_state.remote_models = models
+                st.success(f"✅ 获取到 {len(models)} 个模型")
+                st.rerun()
+
+    if test_clicked:
+        if not admin_pwd:
+            st.error("请输入管理员口令")
+        else:
+            with st.spinner("正在测试连接（真实发送一次最小调用）..."):
+                result = admin_test_model({
+                    "password": admin_pwd,
+                    "openai_api_key": new_openai_key or None,
+                    "openai_base_url": new_base_url or None,
+                    "openai_model": new_model or None,
+                })
+            if result is None:
+                st.error("测试失败：后端异常")
+            elif result.get("ok"):
+                st.success(f"✅ {result.get('message', '连接成功')}")
+            else:
+                st.error(f"❌ 连接失败：{result.get('message', '未知错误')}")
+
+    if save_clicked:
+        if not admin_pwd:
+            st.error("请输入管理员口令")
+        elif not (new_openai_key or new_base_url or new_model or new_tavily_key):
+            st.warning("请至少填写一项要修改的配置")
+        else:
+            result = update_admin_config({
+                "password": admin_pwd,
+                "openai_api_key": new_openai_key or None,
+                "openai_base_url": new_base_url or None,
+                "openai_model": new_model or None,
+                "tavily_api_key": new_tavily_key or None,
+            })
+            if result is None:
+                st.error("保存失败：口令错误或后端异常")
+            else:
+                st.success(f"✅ {result.get('message', '配置已保存并即时生效')}")
+
+    remote_models = st.session_state.get("remote_models") or []
+    if remote_models:
+        with st.expander(f"📋 接口可用模型（{len(remote_models)} 个）", expanded=False):
+            for m in remote_models[:50]:
+                st.code(m, language=None)
+            if len(remote_models) > 50:
+                st.caption(f"仅显示前 50 个，共 {len(remote_models)} 个")
+
+
 def render_sidebar():
     """渲染侧边栏"""
     with st.sidebar:
@@ -643,8 +789,8 @@ def render_sidebar():
         st.markdown("""
         - **后端**: FastAPI + LangGraph
         - **前端**: Streamlit
-        - **LLM**: OpenAI GPT-4o
-        - **搜索**: Tavily API
+        - **检索**: ArXiv 学术 + Tavily 网络
+        - **模型**: OpenAI 兼容接口（服务端可配置）
         """)
         st.divider()
 
@@ -729,88 +875,11 @@ def render_sidebar():
         admin_status = get_admin_status()
         if admin_status is None:
             return
-        with st.expander("⚙️ 系统设置"):
+        with st.expander("⚙️ 系统设置", expanded=False):
             if not admin_status.get("admin_enabled"):
-                st.caption("在线配置未启用：需在服务器 .env 中设置 ADMIN_PASSWORD 后重启服务")
+                st.info("在线配置未启用：需在服务器 `.env` 中设置 `ADMIN_PASSWORD` 后重启服务。")
             else:
-                st.caption(
-                    f"OpenAI Key: {'✅ 已配置' if admin_status.get('openai_key_set') else '❌ 未配置'}　"
-                    f"Tavily Key: {'✅ 已配置' if admin_status.get('tavily_key_set') else '❌ 未配置'}"
-                )
-                with st.form("admin_config_form"):
-                    admin_pwd = st.text_input("管理员口令", type="password")
-                    new_openai_key = st.text_input("OPENAI_API_KEY（留空不修改）", type="password")
-                    new_base_url = st.text_input("OPENAI_BASE_URL（留空不修改）")
-                    new_model = st.text_input("默认模型名（留空不修改）")
-                    new_tavily_key = st.text_input("TAVILY_API_KEY（留空不修改）", type="password")
-                    col_a, col_b, col_c = st.columns(3)
-                    with col_a:
-                        fetch_clicked = st.form_submit_button("📋 获取模型", use_container_width=True)
-                    with col_b:
-                        test_clicked = st.form_submit_button("🔌 测试连接", use_container_width=True)
-                    with col_c:
-                        save_clicked = st.form_submit_button("💾 保存配置", use_container_width=True)
-                if fetch_clicked:
-                    if not admin_pwd:
-                        st.error("请输入管理员口令")
-                    else:
-                        with st.spinner("正在获取模型列表..."):
-                            result = admin_list_models({
-                                "password": admin_pwd,
-                                "openai_api_key": new_openai_key or None,
-                                "openai_base_url": new_base_url or None,
-                            })
-                        if result is None:
-                            st.error("获取失败：后端异常")
-                        elif result.get("error"):
-                            st.error(f"获取失败：{result['error']}")
-                        else:
-                            models = result.get("models", [])
-                            st.session_state.remote_models = models
-                            st.success(f"✅ 获取到 {len(models)} 个模型，见下方列表")
-                            st.rerun()
-                if test_clicked:
-                    if not admin_pwd:
-                        st.error("请输入管理员口令")
-                    else:
-                        with st.spinner("正在测试连接（真实发送一次最小调用）..."):
-                            result = admin_test_model({
-                                "password": admin_pwd,
-                                "openai_api_key": new_openai_key or None,
-                                "openai_base_url": new_base_url or None,
-                                "openai_model": new_model or None,
-                            })
-                        if result is None:
-                            st.error("测试失败：后端异常")
-                        elif result.get("ok"):
-                            st.success(f"✅ {result.get('message', '连接成功')}")
-                        else:
-                            st.error(f"❌ 连接失败：{result.get('message', '未知错误')}")
-                if save_clicked:
-                    if not admin_pwd:
-                        st.error("请输入管理员口令")
-                    elif not (new_openai_key or new_base_url or new_model or new_tavily_key):
-                        st.warning("请至少填写一项要修改的配置")
-                    else:
-                        result = update_admin_config({
-                            "password": admin_pwd,
-                            "openai_api_key": new_openai_key or None,
-                            "openai_base_url": new_base_url or None,
-                            "openai_model": new_model or None,
-                            "tavily_api_key": new_tavily_key or None,
-                        })
-                        if result is None:
-                            st.error("保存失败：口令错误或后端异常")
-                        else:
-                            st.success(f"✅ {result.get('message', '配置已保存并即时生效')}")
-                # 展示接口可用模型列表（点击「获取模型」后出现）
-                remote_models = st.session_state.get("remote_models") or []
-                if remote_models:
-                    with st.expander(f"📋 接口可用模型（{len(remote_models)} 个，点击代码块右侧复制）"):
-                        for m in remote_models[:50]:
-                            st.code(m, language=None)
-                        if len(remote_models) > 50:
-                            st.caption(f"仅显示前 50 个，共 {len(remote_models)} 个")
+                _render_admin_settings(admin_status)
 
 
 def render_input_section():
@@ -1168,7 +1237,9 @@ def main():
 
     if thread_id:
         st.divider()
-        render_progress_section()
+        # 任务进行中/失败时展示进度；完成后或进入审核后隐藏，避免报告上方还挂着进度条
+        if st.session_state.task_status in ("running", "error"):
+            render_progress_section()
         render_report_section()
         render_review_section()
 
