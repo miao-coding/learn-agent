@@ -819,6 +819,22 @@ def render_sidebar():
                 if deps.get("llm_base_url"):
                     st.caption(f"接口：`{deps.get('llm_base_url')}`")
                 st.caption("ArXiv：✅ 默认可用（国内 PDF 可能超时）")
+                # 免 Key 补充源
+                free_parts = []
+                if deps.get("duckduckgo_enabled"):
+                    free_parts.append("DuckDuckGo")
+                if deps.get("wikipedia_enabled"):
+                    free_parts.append("Wikipedia")
+                if deps.get("semantic_scholar_enabled"):
+                    free_parts.append("Semantic Scholar")
+                if deps.get("openalex_enabled"):
+                    free_parts.append("OpenAlex")
+                if free_parts:
+                    st.caption("免 Key 源：" + "、".join(free_parts))
+                if deps.get("searxng_reachable"):
+                    st.caption(f"自建 SearXNG：✅ `{deps.get('searxng_url')}`")
+                else:
+                    st.caption("自建 SearXNG：未启动（可选）")
 
         # 历史任务（服务器持久化，刷新/退出不丢失）
         st.divider()

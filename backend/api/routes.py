@@ -792,6 +792,19 @@ async def get_dependencies():
         or tavily_raw.startswith("your-")
         or tavily_raw == "your-tavily-api-key-here"
     )
+
+    # 探测本地 SearXNG（用 / 首页探活；完整 /search 会等上游引擎，太慢）
+    searx_url = os.environ.get("SEARXNG_URL", "http://127.0.0.1:8888").rstrip("/")
+    searx_ok = False
+    try:
+        import httpx
+
+        async with httpx.AsyncClient(timeout=1.5) as client:
+            r = await client.get(searx_url + "/")
+            searx_ok = r.status_code == 200 and ("searx" in r.text.lower() or "SearXNG" in r.text)
+    except Exception:
+        searx_ok = False
+
     return DependenciesResponse(
         backend_ok=True,
         llm_key_set=bool((settings.openai_api_key or "").strip()),
@@ -800,4 +813,10 @@ async def get_dependencies():
         tavily_key_set=bool(tavily_raw) and not placeholder,
         tavily_key_placeholder=placeholder,
         arxiv_enabled=True,
+        duckduckgo_enabled=True,
+        wikipedia_enabled=True,
+        semantic_scholar_enabled=True,
+        openalex_enabled=True,
+        searxng_url=searx_url,
+        searxng_reachable=searx_ok,
     )

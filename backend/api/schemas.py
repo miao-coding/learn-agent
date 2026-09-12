@@ -144,3 +144,10 @@ class DependenciesResponse(BaseModel):
     tavily_key_set: bool = False
     tavily_key_placeholder: bool = False
     arxiv_enabled: bool = True
+    # 免 Key 补充源
+    duckduckgo_enabled: bool = True
+    wikipedia_enabled: bool = True
+    semantic_scholar_enabled: bool = True
+    openalex_enabled: bool = True
+    searxng_url: str = ""
+    searxng_reachable: bool = False

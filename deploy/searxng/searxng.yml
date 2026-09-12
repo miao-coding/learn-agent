@@ -1,0 +1,44 @@
+# SearXNG 低内存 / 精简引擎（国内服务器上游常超时，优先保留可达源）
+use_default_settings: true
+general:
+  debug: false
+  instance_name: "learn-agent searxng"
+search:
+  safe_search: 0
+  autocomplete: ""
+  default_lang: "en"
+  formats:
+    - html
+    - json
+server:
+  secret_key: "learn-agent-searxng-local"
+  limiter: false
+  image_proxy: false
+  port: 8080
+  bind_address: "0.0.0.0"
+ui:
+  static_use_hash: true
+outgoing:
+  request_timeout: 8.0
+  max_request_timeout: 12.0
+  pool_connections: 20
+  pool_maxsize: 20
+engines:
+  - name: google
+    disabled: true
+  - name: bing
+    disabled: true
+  - name: brave
+    disabled: true
+  - name: duckduckgo
+    disabled: false
+  - name: wikipedia
+    disabled: false
+  - name: arxiv
+    disabled: false
+  - name: github
+    disabled: false
+  - name: stackoverflow
+    disabled: false
+  - name: semantic scholar
+    disabled: false

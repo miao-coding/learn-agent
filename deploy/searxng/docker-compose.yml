@@ -1,0 +1,16 @@
+# 自建 SearXNG（低内存配置，适合 1.6G 小服务器）
+# 用法：docker compose up -d
+services:
+  searxng:
+    image: searxng/searxng:latest
+    container_name: learn-agent-searxng
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8888:8080"
+    volumes:
+      # 只挂载 settings，避免 named volume 覆盖 /etc/searxng 导致配置失效
+      - ./searxng.yml:/etc/searxng/settings.yml:ro
+    environment:
+      - SEARXNG_BASE_URL=http://127.0.0.1:8888/
+    mem_limit: 280m
+    cpus: 0.5

@@ -12,6 +12,9 @@ markdown>=3.5
 
 # 搜索工具
 tavily-python
+# 免 Key 网页/学术补充源
+ddgs>=9.0.0
+wikipedia>=1.4
 
 # 学术检索（4.x 移除了 Result.download_pdf/pdf_url，代码已兼容 2.x/4.x）
 arxiv>=2.0,<6

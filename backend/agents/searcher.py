@@ -23,6 +23,13 @@ from langchain_openai import ChatOpenAI
 from backend.config import settings
 from backend.tools.search import tavily_search, tavily_extract
 from backend.tools.arxiv_tool import arxiv_search, arxiv_download
+from backend.tools.web_search_free import (
+    duckduckgo_search,
+    openalex_search,
+    semantic_scholar_search,
+    searxng_search,
+    wikipedia_search,
+)
 from backend.utils.progress import report_progress
 
 logger = logging.getLogger(__name__)
@@ -48,22 +55,28 @@ def _is_tool_failure(result: str) -> bool:
 # ── 搜索员系统提示词 ─────────────────────────────────────────────
 SEARCHER_SYSTEM_PROMPT = """你是一个专业的学术文献检索员。你的任务是根据给定的研究方向，进行高效的文献检索，收集相关学术论文和研究资料。
 
+可用检索工具（按优先级）：
+1. arxiv_search — 学术论文主源（有限流，少而精，2-3 次足够）
+2. semantic_scholar_search / openalex_search — 学术补充（引用数、元数据，无需 Key）
+3. duckduckgo_search / wikipedia_search — 网页与百科补充（无需 Key）
+4. searxng_search — 本地元搜索（若可用）
+5. tavily_search — 商业网页搜索（可能无 Key 失败，失败勿反复重试）
+
 工作要求：
-1. 根据研究方向生成 **2-3 个**不同角度的检索查询（综述类 survey/review、核心方法名各一条即可；不要发散过多相似 query）
-2. 优先使用 arxiv_search。**同一查询不要重复发送**；ArXiv 有限流，尽量少而精
-3. tavily_search 失败时不要反复重试，直接依赖 arxiv_search
-4. 整理所有检索结果，确保包含来源信息
+1. 先用 1-2 条 arxiv_search 覆盖综述与核心方法
+2. Tavily 失败时立刻改用 duckduckgo_search / semantic_scholar_search，不要空转
+3. 同一查询不要重复发送
+4. 整理结果并标明来源（arxiv / web / scholar / wiki / searxng）
 
 输出格式：
 - 每条结果包含：标题、来源URL、关键内容摘要
 - 按重要性排序
-- 明确区分学术论文结果（arxiv/arxiv_pdf）和网络补充资料（web）
+- 区分学术来源与网络来源
 
 检索策略：
-- 先宽后深：一个宽泛 survey 查询 + 1-2 个具体方法/技术词查询即可
-- 优先收录：高引综述、里程碑工作、SOTA 方法
-- arxiv_download 仅在摘要明显不足时使用，整个任务最多 1 篇
-- 若工具返回「限流」「429」或「冷却」，停止继续调用 ArXiv，用已有结果总结"""
+- 先宽后深：survey + 1-2 个具体方法词
+- arxiv_download 仅在摘要不足时用，整个任务最多 1 篇
+- 若工具返回「限流」「429」或「冷却」，停止继续调用该源，换其它源或用已有结果总结"""
 
 
 async def searcher_agent(state: dict, config: RunnableConfig) -> dict[str, Any]:
@@ -95,7 +108,17 @@ async def searcher_agent(state: dict, config: RunnableConfig) -> dict[str, Any]:
         base_url=llm_cfg["base_url"],
         temperature=0.1,
     )
-    tools = [tavily_search, tavily_extract, arxiv_search, arxiv_download]
+    tools = [
+        tavily_search,
+        tavily_extract,
+        arxiv_search,
+        arxiv_download,
+        duckduckgo_search,
+        wikipedia_search,
+        semantic_scholar_search,
+        openalex_search,
+        searxng_search,
+    ]
     llm_with_tools = llm.bind_tools(tools)
     tool_map = {tool.name: tool for tool in tools}
 
@@ -191,29 +214,24 @@ async def searcher_agent(state: dict, config: RunnableConfig) -> dict[str, Any]:
                         if "429" in result_text or "限流" in result_text or "冷却" in result_text:
                             arxiv_call_budget = 0
                         continue
-                    # 记录搜索结果
-                    if tool_name == "tavily_search":
+                    # 记录搜索结果（按工具映射来源类型）
+                    source_map = {
+                        "tavily_search": "web",
+                        "arxiv_search": "arxiv",
+                        "arxiv_download": "arxiv_pdf",
+                        "duckduckgo_search": "web",
+                        "wikipedia_search": "wiki",
+                        "semantic_scholar_search": "scholar",
+                        "openalex_search": "scholar",
+                        "searxng_search": "web",
+                    }
+                    if tool_name in source_map:
+                        qfield = "paper_id" if tool_name == "arxiv_download" else "query"
                         all_search_results.append(
                             {
-                                "query": tool_args.get("query", ""),
+                                "query": tool_args.get(qfield, ""),
                                 "result": result_text,
-                                "source": "web",
-                            }
-                        )
-                    elif tool_name == "arxiv_search":
-                        all_search_results.append(
-                            {
-                                "query": tool_args.get("query", ""),
-                                "result": result_text,
-                                "source": "arxiv",
-                            }
-                        )
-                    elif tool_name == "arxiv_download":
-                        all_search_results.append(
-                            {
-                                "query": tool_args.get("paper_id", ""),
-                                "result": result_text,
-                                "source": "arxiv_pdf",
+                                "source": source_map[tool_name],
                             }
                         )
                 except Exception as e:
