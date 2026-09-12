@@ -8,6 +8,7 @@
 import json
 import logging
 import os
+from contextvars import ContextVar
 from pathlib import Path
 
 import matplotlib
@@ -27,21 +28,35 @@ plt.rcParams["axes.unicode_minus"] = False
 # ── 图表输出目录 ─────────────────────────────────────────────────
 CHARTS_DIR = Path(__file__).parent.parent.parent / "output" / "charts"
 
+# 当前研究 thread_id：图表按任务分子目录，避免多任务串图/互相覆盖
+# asyncio.to_thread 会拷贝 context，线程池内工具仍能读到
+_chart_thread_id: ContextVar[str] = ContextVar("chart_thread_id", default="")
 
-def _ensure_charts_dir() -> None:
-    """确保图表输出目录存在"""
-    CHARTS_DIR.mkdir(parents=True, exist_ok=True)
+
+def set_chart_thread_id(thread_id: str) -> None:
+    """由分析师节点在调用绘图工具前设置，用于隔离图表目录"""
+    _chart_thread_id.set(thread_id or "")
+
+
+def _ensure_charts_dir() -> Path:
+    """确保当前任务的图表目录存在（output/charts/<thread_id>/）"""
+    tid = _chart_thread_id.get().strip()
+    # 仅保留安全字符，防止路径注入
+    safe_tid = "".join(c if c.isalnum() or c in "-_" else "_" for c in tid) or "misc"
+    target = CHARTS_DIR / safe_tid
+    target.mkdir(parents=True, exist_ok=True)
+    return target
 
 
 def _save_chart(fig: plt.Figure, chart_name: str) -> str:
-    """保存图表到文件并返回路径"""
-    _ensure_charts_dir()
+    """保存图表到当前任务子目录并返回路径"""
+    out_dir = _ensure_charts_dir()
     # 清理文件名中的非法字符
     safe_name = "".join(c if c.isalnum() or c in "-_ " else "_" for c in chart_name)
     safe_name = safe_name.strip().replace(" ", "_")
     if not safe_name:
         safe_name = "chart"
-    filepath = CHARTS_DIR / f"{safe_name}.png"
+    filepath = out_dir / f"{safe_name}.png"
     fig.savefig(str(filepath), dpi=150, bbox_inches="tight")
     plt.close(fig)
     return str(filepath)

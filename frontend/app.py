@@ -863,12 +863,26 @@ def _extract_toc(report: str) -> list[tuple[str, str]]:
 
 
 def _render_charts_tab():
-    """渲染图表 Tab"""
-    chart_files = sorted(glob.glob("output/charts/*.png"))
-    if chart_files:
-        for chart_path in chart_files:
-            st.image(chart_path, use_container_width=True)
-            st.caption(f"图表: {Path(chart_path).stem}")
+    """渲染图表 Tab — 仅显示当前任务 charts 列表中的文件，避免串到其它任务"""
+    chart_paths = list(st.session_state.get("charts") or [])
+    # 兼容历史 checkpoint：若列表为空则不回退到全局目录扫描（那是串台根因）
+    visible = []
+    for p in chart_paths:
+        if not p:
+            continue
+        path = Path(p)
+        # 相对路径按项目根解析；绝对路径直接用
+        if not path.is_absolute():
+            path = Path.cwd() / path
+        if path.exists():
+            visible.append(path)
+        else:
+            st.caption(f"图表文件缺失：{p}")
+
+    if visible:
+        for path in visible:
+            st.image(str(path), use_container_width=True)
+            st.caption(f"图表: {path.stem}")
             st.divider()
     else:
         st.info("本次研究未生成图表数据")

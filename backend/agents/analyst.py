@@ -64,7 +64,7 @@ RAG 检索能力：你可以使用 rag_search 工具从向量数据库中精确�
 当你需要核实某个论断的文献依据、查证性能数据或补充分析细节时，主动调用 rag_search 获取最相关的信息。"""
 
 
-async def analyst_agent(state: dict) -> dict[str, Any]:
+async def analyst_agent(state: dict, config=None) -> dict[str, Any]:
     """分析师节点 - 对搜索结果进行深度分析，提取关键数据
 
     流程：
@@ -75,6 +75,7 @@ async def analyst_agent(state: dict) -> dict[str, Any]:
 
     Args:
         state: AgentState 字典，包含 search_results、topic 字段
+        config: LangGraph 注入的运行配置（含 thread_id），用于隔离图表输出目录
 
     Returns:
         包含 analysis_data、current_phase、messages 的状态更新字典
@@ -82,6 +83,17 @@ async def analyst_agent(state: dict) -> dict[str, Any]:
     topic = state["topic"]
     search_results = state.get("search_results", [])
     logger.info(f"分析师开始工作，主题: {topic}，搜索结果数: {len(search_results)}")
+
+    # 图表按 thread_id 子目录隔离，避免多任务图表互相覆盖/串台
+    from backend.tools.visualization import set_chart_thread_id
+
+    tid = ""
+    try:
+        if config:
+            tid = (config.get("configurable") or {}).get("thread_id", "") or ""
+    except Exception:
+        tid = ""
+    set_chart_thread_id(tid)
 
     # 上游已失败：短路透传，不继续分析
     if state.get("current_phase") == "failed":
