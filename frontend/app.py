@@ -1332,7 +1332,7 @@ def render_input_section():
         )
 
     # 可选：上传自己读过的相似文献（PDF/TXT/MD）
-    with st.expander("上传相似文献（可选）", expanded=False):
+    with st.expander("上传文件（可选）", expanded=False):
         st.caption("上传后会抽取正文与文末参考文献线索，与联网检索一并分析；不上传也可直接研究。")
         uploaded_docs = st.file_uploader(
             "选择 PDF / TXT / MD（最多 5 个，单个 ≤20MB）",
