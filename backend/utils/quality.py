@@ -46,7 +46,8 @@ def quality_score_report(
     text = report or ""
     m = re.search(r"(?m)^##\s*(参考文献|References)\s*$", text, re.I)
     body = text[: m.start()] if m else text
-    cited = set(re.findall(r"\[(\d+)", body))
+    # 注意：findall 返回 str，必须转 int 才能与 ref_ids（int）求交
+    cited = {int(x) for x in re.findall(r"\[(\d+)", body)}
     ref_ids = {int(r.get("id", 0)) for r in refs if r.get("id") is not None}
     coverage = (len(cited & ref_ids) / len(ref_ids)) if ref_ids else 0.0
     length_score = min(1.0, len(text.strip()) / 2500.0)

@@ -803,6 +803,7 @@ async def list_running_tasks():
                 topic=str(meta.get("topic") or "")[:60],
                 status="running",
                 elapsed_sec=int(now - started) if started else 0,
+                started_at=float(started or 0.0),
             )
         )
     return running

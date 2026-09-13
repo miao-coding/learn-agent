@@ -381,6 +381,7 @@ def init_session_state():
         "references": [],
         "charts": [],
         "quality_metrics": {},
+        "task_started_at": 0.0,
         "phases": {
             "searching": False,
             "analyzing": False,
@@ -506,6 +507,45 @@ def _fmt_elapsed(sec: int) -> str:
     return f"{m}:{s:02d}"
 
 
+def _render_js_stopwatch(started_at: float) -> None:
+    """前端 JS 秒表：每秒自增，不依赖 SSE 心跳；切换历史再回来也会按绝对时间续走"""
+    if not started_at or float(started_at) <= 0:
+        return
+    # 用 epoch 秒；切换页面/历史后只要 started_at 不变，显示就连续
+    t = _theme_tokens()
+    html = f"""
+<!DOCTYPE html><html><head><meta charset="utf-8">
+<style>
+  body {{ margin:0; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Microsoft YaHei',sans-serif;
+         background:transparent; color:{t['fg']}; }}
+  .sw {{ font-variant-numeric: tabular-nums; font-weight:600; font-size:0.95rem; }}
+  .lbl {{ opacity:0.7; font-size:0.8rem; font-weight:400; }}
+</style></head>
+<body>
+<div><span class="lbl">已运行</span> <span class="sw" id="sw">0:00</span></div>
+<script>
+(function () {{
+  var start = {float(started_at)};
+  var el = document.getElementById('sw');
+  function fmt(sec) {{
+    sec = Math.max(0, Math.floor(sec));
+    var h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
+    var mm = (m < 10 && h > 0 ? '0' : '') + m;
+    var ss = (s < 10 ? '0' : '') + s;
+    return h > 0 ? (h + ':' + mm + ':' + ss) : (m + ':' + ss);
+  }}
+  function tick() {{
+    el.textContent = fmt(Date.now() / 1000 - start);
+  }}
+  tick();
+  setInterval(tick, 1000);
+}})();
+</script>
+</body></html>
+"""
+    components.html(html, height=28, scrolling=False)
+
+
 def delete_history(thread_id: str) -> bool:
     """删除指定历史研究报告（服务端清 checkpoints 持久化数据）"""
     try:
@@ -552,9 +592,11 @@ def _restore_task(tid: str, topic: str, status: str) -> None:
     if status == "completed":
         st.session_state.task_status = "completed"
         st.session_state.stream_consumed = True
+        st.session_state.task_started_at = 0.0
     elif status == "failed":
         st.session_state.task_status = "error"
         st.session_state.stream_consumed = True
+        st.session_state.task_started_at = 0.0
         st.session_state.error_message = "任务已失败（检索或生成未完成）"
     elif status == "reviewing":
         st.session_state.task_status = "reviewing"
@@ -564,6 +606,14 @@ def _restore_task(tid: str, topic: str, status: str) -> None:
         st.session_state.task_status = "running"
         st.session_state.stream_consumed = False
         st.session_state.current_phase = status
+        # 从服务器取绝对开始时间，切换历史后秒表仍连续
+        st.session_state.task_started_at = 0.0
+        for r in fetch_running_tasks():
+            if r.get("thread_id") == tid:
+                st.session_state.task_started_at = float(r.get("started_at") or 0) or time.time()
+                break
+        if not st.session_state.task_started_at:
+            st.session_state.task_started_at = time.time()
         if status in phase_order:
             for p in phase_order[: phase_order.index(status)]:
                 st.session_state.phases[p] = True
@@ -1426,7 +1476,7 @@ def render_input_section():
         result = submit_research(topic.strip(), selected_model, upload_batch_id)
         if result:
             st.session_state.thread_id = result["thread_id"]
-            # 关键：标记运行中，下一轮 rerun 才会进入 process_stream 消费 SSE 进度流
+            st.session_state.task_started_at = time.time()
             st.session_state.task_status = "running"
             st.rerun()
         else:
@@ -1437,6 +1487,10 @@ def render_input_section():
 def render_progress_section():
     """渲染进度区域"""
     st.markdown("### 任务进度")
+    # 秒表：每秒自增；历史切换后用绝对 started_at 续走
+    started = float(st.session_state.get("task_started_at") or 0)
+    if st.session_state.task_status == "running" and started > 0:
+        _render_js_stopwatch(started)
 
     if st.session_state.error_message:
         st.error(f"{st.session_state.error_message}")

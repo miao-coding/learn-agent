@@ -147,6 +147,7 @@ class RunningTaskItem(BaseModel):
     topic: str = ""
     status: str = ""
     elapsed_sec: int = 0
+    started_at: float = 0.0
 
 
 class DeleteResponse(BaseModel):
