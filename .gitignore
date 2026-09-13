@@ -37,6 +37,10 @@ Thumbs.db
 # ChromaDB 向量数据库
 output/chroma_db/
 
+# 用户上传文献与生成图表（运行时数据）
+output/uploads/
+output/charts/
+
 # 子项目（另行管理）
 file_management/
 
