@@ -1,14 +1,23 @@
 ---
 feature: skill-schema-supervisor-quality
-status: designed
+status: delivered
 updated: 2026-09-12
 branch: main
-commits: 
+commits: f8e30fe..baecf1a
 ---
 
 # 技能层 / 结构化产出 / Supervisor / 质量门禁
 
 ## Report
+
+**What was built** — `backend/skills`：检索工具预算、分析字段、报告章节改为 SkillPolicy + 校验。检索按预算限流；真实文献过少 failed。撰稿质量分过低自动重写一次。`quality.py` 评分写入 `quality_metrics`。
+
+**Verification** — `pytest tests/` **183 passed**；已部署服务器。
+
+**Journey log**
+1. Prompt 管策略不可测；Skill 把预算/章节写进代码。
+2. 门禁卡在「检索结束」「撰稿对账后」最有效。
+3. 分析师 schema 缺字段先告警，避免整单失败。
 
 ## [S1] Problem
 
@@ -49,7 +58,7 @@ Agent 能力主要写在 System Prompt 里：检索顺序、分析维度、报�
 
 ## Tasks
 
-- [ ] T1: skills 包 + 校验函数 — acceptance: 单测覆盖 LIT/ANALYSIS/REPORT 校验 (covers: S2)
-- [ ] T2: searcher/analyst/writer 接入 skill policy 与 schema — acceptance: 代码读 skill 而非仅 prompt (covers: S2; depends: T1)
-- [ ] T3: quality 评分 + 门禁 — acceptance: 文献过少可 failed；报告结构分可计算 (covers: S2; depends: T1)
-- [ ] T4: 测试与部署 — acceptance: pytest 全绿并上线 (covers: S2; depends: T2,T3)
+- [x] T1: skills 包 + 校验函数 — acceptance: 单测覆盖 LIT/ANALYSIS/REPORT 校验 (covers: S2)
+- [x] T2: searcher/analyst/writer 接入 skill policy 与 schema — acceptance: 代码读 skill 而非仅 prompt (covers: S2; depends: T1)
+- [x] T3: quality 评分 + 门禁 — acceptance: 文献过少可 failed；报告结构分可计算 (covers: S2; depends: T1)
+- [x] T4: 测试与部署 — acceptance: pytest 全绿并上线 (covers: S2; depends: T2,T3)
