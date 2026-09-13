@@ -507,11 +507,11 @@ def _fmt_elapsed(sec: int) -> str:
     return f"{m}:{s:02d}"
 
 
-def _render_js_stopwatch(started_at: float) -> None:
+def _render_js_stopwatch(started_at: float, dom_id: str = "sw") -> None:
     """前端 JS 秒表：每秒自增，不依赖 SSE 心跳；切换历史再回来也会按绝对时间续走"""
     if not started_at or float(started_at) <= 0:
         return
-    # 用 epoch 秒；切换页面/历史后只要 started_at 不变，显示就连续
+    safe = "".join(c if c.isalnum() else "_" for c in dom_id)[:40] or "sw"
     t = _theme_tokens()
     html = f"""
 <!DOCTYPE html><html><head><meta charset="utf-8">
@@ -522,11 +522,11 @@ def _render_js_stopwatch(started_at: float) -> None:
   .lbl {{ opacity:0.7; font-size:0.8rem; font-weight:400; }}
 </style></head>
 <body>
-<div><span class="lbl">已运行</span> <span class="sw" id="sw">0:00</span></div>
+<div><span class="lbl">已运行</span> <span class="sw" id="{safe}">0:00</span></div>
 <script>
 (function () {{
   var start = {float(started_at)};
-  var el = document.getElementById('sw');
+  var el = document.getElementById('{safe}');
   function fmt(sec) {{
     sec = Math.max(0, Math.floor(sec));
     var h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
@@ -535,7 +535,7 @@ def _render_js_stopwatch(started_at: float) -> None:
     return h > 0 ? (h + ':' + mm + ':' + ss) : (m + ':' + ss);
   }}
   function tick() {{
-    el.textContent = fmt(Date.now() / 1000 - start);
+    if (el) el.textContent = fmt(Date.now() / 1000 - start);
   }}
   tick();
   setInterval(tick, 1000);
@@ -625,15 +625,16 @@ def _restore_task(tid: str, topic: str, status: str) -> None:
         for k in st.session_state.phases:
             st.session_state.phases[k] = False
 
-    # 拉取报告（reviewing / completed 都已写入 final_report）
-    report_data = get_report(tid)
-    if report_data and report_data.get("report"):
-        st.session_state.report = report_data["report"]
-        if status == "reviewing":
-            st.session_state.report_draft = report_data["report"]
-        st.session_state.references = report_data.get("references", [])
-        st.session_state.charts = report_data.get("charts", [])
-        st.session_state.quality_metrics = report_data.get("quality_metrics") or {}
+    # 仅非运行中才加载报告；运行中不得把旧 draft/历史报告叠在进度下面
+    if status in ("completed", "reviewing", "failed"):
+        report_data = get_report(tid)
+        if report_data and report_data.get("report"):
+            st.session_state.report = report_data["report"]
+            if status == "reviewing":
+                st.session_state.report_draft = report_data["report"]
+            st.session_state.references = report_data.get("references", [])
+            st.session_state.charts = report_data.get("charts", [])
+            st.session_state.quality_metrics = report_data.get("quality_metrics") or {}
     st.rerun()
 
 
@@ -790,36 +791,38 @@ def process_stream(thread_id: str):
     st.session_state.task_status = "running"
     st.session_state.stream_consumed = False
 
-    # 使用占位符实时更新（阶段区与日志区分离，避免 heartbeat 整块重绘导致页面跳动）
+    # 秒表独立占位：只渲染一次 JS，heartbeat 不再重绘时间（避免 2s 跳）
+    if not st.session_state.get("task_started_at"):
+        st.session_state.task_started_at = time.time()
+    with st.empty().container():
+        _render_js_stopwatch(st.session_state.task_started_at, dom_id="sw-stream")
+    st.caption("连接正常，系统处理中")
+
     phases_placeholder = st.empty()
     log_placeholder = st.empty()
     meta_placeholder = st.empty()
 
     token_buffer = []  # 用于收集 token 事件的内容
-    t0 = time.time()  # 任务开始时间（用于运行计时显示）
     last_render = 0.0
 
     def _paint(force: bool = False, writing_chars: int | None = None):
         nonlocal last_render
         now = time.time()
-        # 心跳约 2s 一次；节流仅防同秒多次事件把页面顶飞
         if not force and (now - last_render) < 0.3:
             return
         last_render = now
-        elapsed = int(now - t0)
         with phases_placeholder.container():
             _phase_step_rows()
         with log_placeholder.container():
             _render_progress_log()
         with meta_placeholder.container():
+            # 不在这里显示秒表时间，避免与 JS 秒表抢刷新
             if writing_chars is not None:
-                st.caption(f"正在撰写综述… 已生成 {writing_chars} 字 · 已运行 {elapsed // 60}:{elapsed % 60:02d}")
-            else:
-                st.caption(f"已运行 {elapsed // 60}:{elapsed % 60:02d} · 连接正常，系统处理中")
+                st.caption(f"正在撰写综述… 已生成 {writing_chars} 字")
 
     for event_type, data in consume_sse_sync(thread_id):
         if event_type == "heartbeat":
-            _paint()
+            # 仅保活；时间由 JS 秒表每秒自增，不重绘
             continue
 
         if event_type == "phase":
@@ -1305,14 +1308,16 @@ def render_sidebar():
             for r in running:
                 rid = r.get("thread_id") or ""
                 rtopic = (r.get("topic") or "未命名研究")[:28]
-                elapsed = _fmt_elapsed(r.get("elapsed_sec") or 0)
+                started = float(r.get("started_at") or 0)
                 col_run, col_open_run = st.columns([3, 1])
                 with col_run:
                     st.markdown(
                         f"<div class='st-row' style='font-size:0.85rem'>"
-                        f"{_svg_status_icon('run', size=14)}<span>{rtopic} · 已运行 {elapsed}</span></div>",
+                        f"{_svg_status_icon('run', size=14)}<span>{rtopic}</span></div>",
                         unsafe_allow_html=True,
                     )
+                    if started > 0:
+                        _render_js_stopwatch(started, dom_id=f"sw-{rid[:8]}")
                 with col_open_run:
                     if st.button("查看", key=f"run-open-{rid}", use_container_width=True):
                         _restore_task(rid, rtopic, "searching")
@@ -1490,7 +1495,7 @@ def render_progress_section():
     # 秒表：每秒自增；历史切换后用绝对 started_at 续走
     started = float(st.session_state.get("task_started_at") or 0)
     if st.session_state.task_status == "running" and started > 0:
-        _render_js_stopwatch(started)
+        _render_js_stopwatch(started, dom_id="sw-main")
 
     if st.session_state.error_message:
         st.error(f"{st.session_state.error_message}")
@@ -1560,6 +1565,9 @@ def render_report_section():
     report = st.session_state.report
     draft = st.session_state.report_draft
 
+    # 运行中不展示旧报告，避免与进度区叠在一起
+    if st.session_state.task_status == "running":
+        return
     if not report and not draft:
         return
 
