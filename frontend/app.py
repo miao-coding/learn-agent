@@ -567,18 +567,49 @@ def _restore_task(tid: str, topic: str, status: str) -> None:
     st.rerun()
 
 
-def submit_research(topic: str, model_name: str = "") -> dict | None:
-    """提交研究任务"""
+def submit_research(topic: str, model_name: str = "", upload_batch_id: str = "") -> dict | None:
+    """提交研究任务（upload_batch_id 可选）"""
     try:
+        payload = {"topic": topic, "model_name": model_name}
+        if upload_batch_id:
+            payload["upload_batch_id"] = upload_batch_id
         resp = requests.post(
             f"{API_BASE_URL}/api/research",
-            json={"topic": topic, "model_name": model_name},
-            timeout=10,
+            json=payload,
+            timeout=15,
         )
         if resp.status_code == 200:
             return resp.json()
+        try:
+            st.session_state["_last_submit_err"] = resp.json().get("detail", "")
+        except Exception:
+            st.session_state["_last_submit_err"] = resp.text[:200]
         return None
-    except Exception:
+    except Exception as e:
+        st.session_state["_last_submit_err"] = str(e)
+        return None
+
+
+def upload_research_docs(uploaded_files: list) -> dict | None:
+    """上传 PDF/TXT/MD 文献，返回 {batch_id, files}"""
+    if not uploaded_files:
+        return None
+    files = []
+    for f in uploaded_files:
+        name = getattr(f, "name", "doc.pdf")
+        data = f.getvalue() if hasattr(f, "getvalue") else f.read()
+        files.append(("files", (name, data, "application/octet-stream")))
+    try:
+        resp = requests.post(f"{API_BASE_URL}/api/uploads/research-docs", files=files, timeout=120)
+        if resp.status_code == 200:
+            return resp.json()
+        try:
+            st.session_state["_last_upload_err"] = resp.json().get("detail", "")
+        except Exception:
+            st.session_state["_last_upload_err"] = resp.text[:200]
+        return None
+    except Exception as e:
+        st.session_state["_last_upload_err"] = str(e)
         return None
 
 
@@ -1295,10 +1326,24 @@ def render_input_section():
         )
     with col_btn:
         start_clicked = st.button(
-            " 开始研究",
+            "开始研究",
             use_container_width=True,
             disabled=st.session_state.task_status == "running",
         )
+
+    # 可选：上传自己读过的相似文献（PDF/TXT/MD）
+    with st.expander("上传相似文献（可选）", expanded=False):
+        st.caption("上传后会抽取正文与文末参考文献线索，与联网检索一并分析；不上传也可直接研究。")
+        uploaded_docs = st.file_uploader(
+            "选择 PDF / TXT / MD（最多 5 个，单个 ≤20MB）",
+            type=["pdf", "txt", "md"],
+            accept_multiple_files=True,
+            disabled=st.session_state.task_status == "running",
+        )
+        if uploaded_docs:
+            st.caption(f"已选择 {len(uploaded_docs)} 个文件：")
+            for u in uploaded_docs:
+                st.write(f"- {u.name} ({getattr(u, 'size', 0) or 0} bytes)")
 
     if start_clicked and topic.strip():
         st.session_state.topic = topic.strip()
@@ -1315,16 +1360,34 @@ def render_input_section():
         for k in st.session_state.phases:
             st.session_state.phases[k] = False
 
+        # 可选上传
+        upload_batch_id = ""
+        if uploaded_docs:
+            with st.spinner("正在解析上传文献..."):
+                up = upload_research_docs(uploaded_docs)
+            if not up or not up.get("batch_id"):
+                err = st.session_state.get("_last_upload_err") or "文献上传失败"
+                st.error(err)
+                return
+            upload_batch_id = up["batch_id"]
+            st.success(
+                "文献已解析："
+                + "；".join(
+                    f"{f.get('filename')}（{f.get('text_chars')} 字，参考线索 {f.get('reference_count')}）"
+                    for f in up.get("files") or []
+                )
+            )
+
         # 提交任务
-        result = submit_research(topic.strip(), selected_model)
+        result = submit_research(topic.strip(), selected_model, upload_batch_id)
         if result:
             st.session_state.thread_id = result["thread_id"]
             # 关键：标记运行中，下一轮 rerun 才会进入 process_stream 消费 SSE 进度流
-            # （遗漏此行会导致前端永远不消费进度事件，界面停留在初始状态）
             st.session_state.task_status = "running"
             st.rerun()
         else:
-            st.error("提交任务失败，请检查后端服务是否正常运行。")
+            err = st.session_state.get("_last_submit_err") or "提交任务失败，请检查后端服务是否正常运行。"
+            st.error(err)
 
 
 def render_progress_section():

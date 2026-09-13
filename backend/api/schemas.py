@@ -11,6 +11,11 @@ class ResearchRequest(BaseModel):
         max_length=100,
         description="指定研究模型（须在服务端可用列表内），留空使用默认模型",
     )
+    upload_batch_id: Optional[str] = Field(
+        None,
+        max_length=64,
+        description="可选：用户上传文献的 batch id（先调 POST /api/uploads/research-docs）",
+    )
 
     @field_validator("topic")
     @classmethod
@@ -25,6 +30,12 @@ class ResearchResponse(BaseModel):
     thread_id: str
     status: str = "started"
     topic: str
+
+
+class UploadDocsResponse(BaseModel):
+    """上传文献响应"""
+    batch_id: str
+    files: list[dict] = []
 
 
 class AvailableModelsResponse(BaseModel):

@@ -56,3 +56,6 @@ class AgentState(TypedDict):
 
     # ── 质量评分（Supervisor 门禁 / 日志，可选） ─────────────────
     quality_metrics: dict[str, Any]
+
+    # ── 用户上传文献种子（可选） ────────────────────────────────
+    uploaded_docs: list[dict[str, Any]]

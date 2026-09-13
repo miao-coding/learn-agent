@@ -100,6 +100,16 @@ async def searcher_agent(state: dict, config: RunnableConfig) -> dict[str, Any]:
     topic = state["topic"]
     logger.info(f"搜索员开始工作，主题: {topic}")
 
+    # ── 用户上传文献种子（可选）────────────────────────────────
+    uploaded_docs = state.get("uploaded_docs") or []
+    upload_seeds: list[dict[str, Any]] = []
+    upload_ref_titles: list[str] = []
+    for doc in uploaded_docs:
+        upload_seeds.extend(doc.get("seeds") or [])
+        upload_ref_titles.extend(doc.get("reference_titles") or [])
+    if upload_seeds:
+        logger.info(f"并入用户上传文献种子 {len(upload_seeds)} 块, 参考线索 {len(upload_ref_titles)} 条")
+
     # ── 初始化 LLM 和工具 ──────────────────────────────────────
     llm_cfg = settings.resolve_llm_config(state.get("model_name"))
     llm = ChatOpenAI(
@@ -126,9 +136,17 @@ async def searcher_agent(state: dict, config: RunnableConfig) -> dict[str, Any]:
     tool_map = {tool.name: tool for tool in tools}
 
     # ── 构建初始消息 ───────────────────────────────────────────
+    upload_note = ""
+    if uploaded_docs:
+        names = ", ".join(d.get("filename") or "doc" for d in uploaded_docs)
+        upload_note = (
+            f"\n\n用户已上传参考文献：{names}。"
+            "这些内容已作为种子结果注入；请结合其主题与文中参考文献线索补充检索，"
+            "不要忽略上传材料，也不要编造上传材料中不存在的引用。"
+        )
     messages: list = [
         SystemMessage(content=SEARCHER_SYSTEM_PROMPT),
-        HumanMessage(content=f"请围绕以下研究方向进行全面文献检索：{topic}"),
+        HumanMessage(content=f"请围绕以下研究方向进行文献检索：{topic}{upload_note}"),
     ]
 
     # ── 工具调用循环：预算来自 LIT_SEARCH Skill ──────────────────
@@ -137,15 +155,45 @@ async def searcher_agent(state: dict, config: RunnableConfig) -> dict[str, Any]:
 
     skill = LIT_SEARCH
     tool_budgets = dict(skill.policy.tool_budgets)
-    all_search_results: list[dict[str, Any]] = []
+    all_search_results: list[dict[str, Any]] = list(upload_seeds)
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     tool_failures: list[str] = []
     seen_arxiv_queries: set[str] = set()
     arxiv_downloaded = 0
+    # 用上传文献里的参考标题补搜一轮（真实二次检索，不是编造）
+    pending_upload_ref_query = upload_ref_titles[0][:180] if upload_ref_titles else ""
 
     for i in range(6):
         logger.debug(f"搜索员第 {i + 1} 轮工具调用")
         await report_progress(config, f"🔎 检索员第 {i + 1} 轮：正在决策检索策略...")
+        # 无工具调用前：若有上传参考标题，强制用 academic_fallback 补搜一次
+        if pending_upload_ref_query and tool_budgets.get("academic_fallback_search", 0) > 0:
+            q = pending_upload_ref_query
+            pending_upload_ref_query = ""
+            tool_budgets["academic_fallback_search"] = tool_budgets.get(
+                "academic_fallback_search", 1
+            ) - 1
+            await report_progress(config, f"🛠 基于上传文献参考线索 academic_fallback_search：{q[:80]}")
+            try:
+                raw = await asyncio.to_thread(
+                    academic_fallback_search.invoke, {"query": q, "max_results": 6}
+                )
+                text = str(raw or "")
+                if text and not _is_tool_failure(text):
+                    all_search_results.append(
+                        {"query": q, "result": text, "source": "scholar"}
+                    )
+                    messages.append(
+                        ToolMessage(
+                            content=f"已根据用户上传论文的参考文献补充检索：\n{text[:4000]}",
+                            tool_call_id=f"upload-ref-{i}",
+                        )
+                    )
+                else:
+                    tool_failures.append(f"upload_ref_search: {text[:80]}")
+            except Exception as e:
+                tool_failures.append(f"upload_ref_search: {e}")
+
         try:
             response = await llm_with_tools.ainvoke(messages)
         except Exception as e:
@@ -238,6 +286,8 @@ async def searcher_agent(state: dict, config: RunnableConfig) -> dict[str, Any]:
                         "europepmc_search": "scholar",
                         "core_search": "scholar",
                         "academic_fallback_search": "scholar",
+                        "uploaded": "uploaded",
+                        "uploaded_refs": "uploaded",
                     }
                     if tool_name in source_map:
                         qfield = "paper_id" if tool_name == "arxiv_download" else "query"

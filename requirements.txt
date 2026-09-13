@@ -9,6 +9,7 @@ fastapi>=0.135.0
 uvicorn[standard]
 streamlit>=1.30
 markdown>=3.5
+python-multipart
 
 # 搜索工具
 tavily-python

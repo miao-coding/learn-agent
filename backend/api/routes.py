@@ -10,7 +10,7 @@ import time
 import uuid
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, File, HTTPException, Request, UploadFile
 from fastapi.responses import StreamingResponse
 from openai import AsyncOpenAI
 
@@ -31,6 +31,7 @@ from backend.api.schemas import (
     ResearchResponse,
     ReviewRequest,
     ReviewResponse,
+    UploadDocsResponse,
 )
 from backend.config import settings, update_env_file
 from backend.tools.search import reload_tavily_client
@@ -87,14 +88,83 @@ async def start_research(request: Request, body: ResearchRequest):
                 detail=f"模型不可用: {body.model_name}，可用模型: {allowed or '未配置（功能未开放）'}",
             )
 
+    # 可选：用户上传文献
+    uploaded_docs: list[dict] = []
+    if body.upload_batch_id:
+        from backend.utils.upload_docs import load_upload_batch, uploads_to_search_seed
+
+        batch = load_upload_batch(body.upload_batch_id)
+        if not batch:
+            raise HTTPException(status_code=400, detail="upload_batch_id 无效或已过期")
+        seeds = uploads_to_search_seed(body.upload_batch_id)
+        uploaded_docs = [
+            {
+                "filename": batch.get("filename", ""),
+                "text": str(batch.get("text") or "")[:50000],
+                "reference_titles": batch.get("reference_titles") or [],
+                "seeds": seeds,
+            }
+        ]
+        logger.info(
+            f"研究任务附加上传文献: {batch.get('filename')} "
+            f"({batch.get('text_chars')} 字, 参考线索 {len(batch.get('reference_titles') or [])})"
+        )
+
     # 启动后台协程执行图
     asyncio.create_task(
-        _run_graph(graph, thread_id, body.topic, event_queue, model_name=body.model_name or ""),
+        _run_graph(
+            graph,
+            thread_id,
+            body.topic,
+            event_queue,
+            model_name=body.model_name or "",
+            uploaded_docs=uploaded_docs,
+        ),
         name=f"research-{thread_id}",
     )
     logger.info(f"研究任务已启动: thread_id={thread_id}, topic={body.topic}")
 
     return ResearchResponse(thread_id=thread_id, topic=body.topic)
+
+
+@router.post("/uploads/research-docs", response_model=UploadDocsResponse)
+async def upload_research_docs(files: list[UploadFile] = File(...)):
+    """上传用户已有研究文献（PDF/TXT/MD，可选）
+
+    返回 batch_id；提交研究时带 upload_batch_id 即可并入检索。
+    """
+    from backend.utils.upload_docs import MAX_FILES, ingest_uploaded_file
+
+    if not files:
+        raise HTTPException(status_code=400, detail="未选择文件")
+    if len(files) > MAX_FILES:
+        raise HTTPException(status_code=400, detail=f"最多上传 {MAX_FILES} 个文件")
+
+    metas = []
+    batch_id = ""
+    for f in files:
+        data = await f.read()
+        try:
+            meta = ingest_uploaded_file(f.filename or "doc.pdf", data)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except Exception as e:
+            logger.exception("上传文献处理失败")
+            raise HTTPException(status_code=500, detail=f"处理失败: {e}")
+        if meta:
+            batch_id = meta.get("batch_id") or batch_id
+            metas.append(
+                {
+                    "filename": meta.get("filename"),
+                    "text_chars": meta.get("text_chars"),
+                    "reference_count": len(meta.get("reference_titles") or []),
+                    "title_guess": meta.get("title_guess"),
+                }
+            )
+
+    if not metas:
+        raise HTTPException(status_code=400, detail="未能从文件中抽取文本")
+    return UploadDocsResponse(batch_id=batch_id, files=metas)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -106,10 +176,16 @@ async def _run_graph(
     topic: str,
     queue: asyncio.Queue,
     model_name: str = "",
+    uploaded_docs: list[dict] | None = None,
 ) -> None:
     """后台执行 LangGraph 图，将事件推送到 asyncio.Queue 供 SSE 消费"""
     config = {"configurable": {"thread_id": thread_id}}
-    initial_state = {"topic": topic, "model_name": model_name, "messages": []}
+    initial_state = {
+        "topic": topic,
+        "model_name": model_name,
+        "messages": [],
+        "uploaded_docs": uploaded_docs or [],
+    }
     # 注册进度总线：Agent 节点内可通过 report_progress 推送工具级实时进度
     progress_bus.register(thread_id, queue)
     # 立即点亮检索阶段（节点 update 要等节点完成才推送，先发一个初始 phase）
