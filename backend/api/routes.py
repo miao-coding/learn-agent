@@ -31,6 +31,7 @@ from backend.api.schemas import (
     ResearchResponse,
     ReviewRequest,
     ReviewResponse,
+    RunningTaskItem,
     UploadDocsResponse,
 )
 from backend.config import settings, update_env_file
@@ -45,6 +46,9 @@ router = APIRouter(prefix="/api", tags=["research"])
 #  活跃任务管理：thread_id → asyncio.Queue
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 active_tasks: dict[str, asyncio.Queue] = {}
+# 任务开始时间与主题，供「进行中任务」显示
+task_started_at: dict[str, float] = {}
+task_meta: dict[str, dict] = {}
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -76,6 +80,8 @@ async def start_research(request: Request, body: ResearchRequest):
     thread_id = str(uuid.uuid4())
     event_queue: asyncio.Queue = asyncio.Queue()
     active_tasks[thread_id] = event_queue
+    task_started_at[thread_id] = time.time()
+    task_meta[thread_id] = {"topic": body.topic[:80], "model": body.model_name or ""}
 
     graph = _get_graph(request)
 
@@ -223,6 +229,8 @@ async def _run_graph(
         await asyncio.sleep(2)
         progress_bus.unregister(thread_id)
         active_tasks.pop(thread_id, None)
+        task_started_at.pop(thread_id, None)
+        task_meta.pop(thread_id, None)
 
 
 async def _finalize_stream(graph: Any, config: dict, queue: asyncio.Queue) -> None:
@@ -350,10 +358,9 @@ async def stream_research(thread_id: str):
         try:
             while True:
                 try:
-                    event = await asyncio.wait_for(event_queue.get(), timeout=10)
+                    event = await asyncio.wait_for(event_queue.get(), timeout=2)
                 except asyncio.TimeoutError:
-                    # 心跳：防止长工具调用期间连接被代理/浏览器断开，
-                    # 同时驱动前端刷新运行计时（10 秒一次）
+                    # 心跳：2s 一次，驱动前端计时近似每秒刷新，并防代理断连
                     yield ": heartbeat\n\n"
                     continue
 
@@ -530,6 +537,8 @@ async def _resume_and_stream(
         await asyncio.sleep(2)
         progress_bus.unregister(thread_id)
         active_tasks.pop(thread_id, None)
+        task_started_at.pop(thread_id, None)
+        task_meta.pop(thread_id, None)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -772,11 +781,31 @@ async def list_history(request: Request, limit: int = 20):
                 topic=str(values.get("topic", ""))[:60],
                 status=str(values.get("current_phase", "")),
                 updated_at=format_checkpoint_time(str(ts)),
+                elapsed_sec=int(time.time() - task_started_at[tid]) if tid in task_started_at else 0,
             ))
         except Exception:
             continue
 
     return items
+
+
+@router.get("/research/running", response_model=list[RunningTaskItem])
+async def list_running_tasks():
+    """当前仍在内存中执行的任务（侧边栏「进行中」）"""
+    running: list[RunningTaskItem] = []
+    now = time.time()
+    for tid in list(active_tasks.keys()):
+        started = task_started_at.get(tid)
+        meta = task_meta.get(tid) or {}
+        running.append(
+            RunningTaskItem(
+                thread_id=tid,
+                topic=str(meta.get("topic") or "")[:60],
+                status="running",
+                elapsed_sec=int(now - started) if started else 0,
+            )
+        )
+    return running
 
 
 async def _delete_thread_from_checkpoints(thread_id: str) -> int:

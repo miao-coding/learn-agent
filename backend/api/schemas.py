@@ -138,6 +138,15 @@ class HistoryItem(BaseModel):
     topic: str = ""
     status: str = ""
     updated_at: str = ""
+    elapsed_sec: int = 0
+
+
+class RunningTaskItem(BaseModel):
+    """进行中任务"""
+    thread_id: str
+    topic: str = ""
+    status: str = ""
+    elapsed_sec: int = 0
 
 
 class DeleteResponse(BaseModel):

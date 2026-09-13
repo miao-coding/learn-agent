@@ -486,6 +486,26 @@ def fetch_history(limit: int = 15) -> list:
         return []
 
 
+def fetch_running_tasks() -> list:
+    """当前进程内仍在执行的任务"""
+    try:
+        resp = requests.get(f"{API_BASE_URL}/api/research/running", timeout=8)
+        if resp.status_code == 200:
+            return resp.json()
+        return []
+    except Exception:
+        return []
+
+
+def _fmt_elapsed(sec: int) -> str:
+    sec = max(0, int(sec or 0))
+    m, s = divmod(sec, 60)
+    h, m = divmod(m, 60)
+    if h:
+        return f"{h}:{m:02d}:{s:02d}"
+    return f"{m}:{s:02d}"
+
+
 def delete_history(thread_id: str) -> bool:
     """删除指定历史研究报告（服务端清 checkpoints 持久化数据）"""
     try:
@@ -732,8 +752,8 @@ def process_stream(thread_id: str):
     def _paint(force: bool = False, writing_chars: int | None = None):
         nonlocal last_render
         now = time.time()
-        # 心跳/token 高频事件节流：至少间隔 1.5s，避免页面被 empty() 反复顶到底部
-        if not force and (now - last_render) < 1.5:
+        # 心跳约 2s 一次；节流仅防同秒多次事件把页面顶飞
+        if not force and (now - last_render) < 0.3:
             return
         last_render = now
         elapsed = int(now - t0)
@@ -1226,10 +1246,34 @@ def render_sidebar():
                 else:
                     st.caption("自建 SearXNG：未启动（可选）")
 
-        # 历史任务（服务器持久化，刷新/退出不丢失）
+        # 进行中任务（内存中仍在跑的）
+        st.divider()
+        st.markdown("## 进行中")
+        running = fetch_running_tasks()
+        if running:
+            st.markdown(_status_icon_css(), unsafe_allow_html=True)
+            for r in running:
+                rid = r.get("thread_id") or ""
+                rtopic = (r.get("topic") or "未命名研究")[:28]
+                elapsed = _fmt_elapsed(r.get("elapsed_sec") or 0)
+                col_run, col_open_run = st.columns([3, 1])
+                with col_run:
+                    st.markdown(
+                        f"<div class='st-row' style='font-size:0.85rem'>"
+                        f"{_svg_status_icon('run', size=14)}<span>{rtopic} · 已运行 {elapsed}</span></div>",
+                        unsafe_allow_html=True,
+                    )
+                with col_open_run:
+                    if st.button("查看", key=f"run-open-{rid}", use_container_width=True):
+                        _restore_task(rid, rtopic, "searching")
+        else:
+            st.caption("暂无进行中的任务")
+
+        # 历史任务（排除进行中，避免与上面重复）
         st.divider()
         st.markdown("## 历史任务")
-        history = fetch_history()
+        running_ids = {r.get("thread_id") for r in running}
+        history = [h for h in fetch_history() if h.get("thread_id") not in running_ids]
         if history:
             st.markdown(_status_icon_css(), unsafe_allow_html=True)
             status_kind = {
@@ -1430,10 +1474,14 @@ def _render_quality_metrics(qm: dict) -> None:
     if r:
         sc = r.get("score")
         cov = r.get("citation_coverage")
+        nref = r.get("references_count")
+        cov_txt = f"引用覆盖 {cov:.0%}" if isinstance(cov, (int, float)) else ""
+        if isinstance(cov, (int, float)) and cov < 0.2 and nref:
+            cov_txt += f"（{nref} 条文献中正文几乎未引用）"
         parts.append((
             "报告",
             f"{sc:.0%}" if isinstance(sc, (int, float)) else "-",
-            f"引用覆盖 {cov:.0%}" if isinstance(cov, (int, float)) else "",
+            cov_txt,
         ))
     if not parts:
         return
