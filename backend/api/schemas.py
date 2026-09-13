@@ -112,6 +112,7 @@ class ReportResponse(BaseModel):
     status: str
     references: list[dict] = []
     charts: list[str] = []
+    quality_metrics: dict = {}
 
 
 class HealthResponse(BaseModel):

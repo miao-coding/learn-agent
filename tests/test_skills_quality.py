@@ -1,6 +1,7 @@
 """Skill 校验与质量门禁"""
 from backend.skills import (
     get_skill,
+    pick_report_template,
     validate_analysis_payload,
     validate_report_structure,
 )
@@ -53,3 +54,11 @@ def test_quality_report_retry():
     refs = [{"id": 1, "title": "a" * 20, "url": "https://x", "source": "arxiv", "date": "2024"}]
     q = quality_score_report("# only title", refs)
     assert should_retry_report(q)
+
+
+def test_pick_report_template():
+    tid, focus = pick_report_template("MAMBA遥感变化检测")
+    assert tid in ("change_detection", "ssm_mamba", "remote_sensing")
+    assert focus
+    tid2, _ = pick_report_template("完全无关的主题xyz")
+    assert tid2 == "general"

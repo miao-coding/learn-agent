@@ -380,6 +380,7 @@ def init_session_state():
         "report_draft": "",
         "references": [],
         "charts": [],
+        "quality_metrics": {},
         "phases": {
             "searching": False,
             "analyzing": False,
@@ -562,6 +563,7 @@ def _restore_task(tid: str, topic: str, status: str) -> None:
             st.session_state.report_draft = report_data["report"]
         st.session_state.references = report_data.get("references", [])
         st.session_state.charts = report_data.get("charts", [])
+        st.session_state.quality_metrics = report_data.get("quality_metrics") or {}
     st.rerun()
 
 
@@ -1346,6 +1348,48 @@ def _render_progress_ui():
     _render_progress_log()
 
 
+def _render_quality_metrics(qm: dict) -> None:
+    """紧凑展示检索/分析/报告质量分（无数据则不占位）"""
+    if not qm:
+        return
+    t = _theme_tokens()
+    parts = []
+    s = qm.get("search") or {}
+    r = qm.get("report") or {}
+    a = qm.get("analysis") or {}
+    if s:
+        sc = s.get("score")
+        n = s.get("references_count", "-")
+        parts.append(("检索", f"{sc:.0%}" if isinstance(sc, (int, float)) else "-", f"文献 {n}"))
+    if a:
+        ok = "通过" if a.get("ok") else "有缺项"
+        parts.append(("分析", ok, f"图表 {a.get('charts', 0)}"))
+    if r:
+        sc = r.get("score")
+        cov = r.get("citation_coverage")
+        parts.append((
+            "报告",
+            f"{sc:.0%}" if isinstance(sc, (int, float)) else "-",
+            f"引用覆盖 {cov:.0%}" if isinstance(cov, (int, float)) else "",
+        ))
+    if not parts:
+        return
+    cells = []
+    for name, val, sub in parts:
+        cells.append(
+            f"<div style='flex:1;min-width:0;padding:6px 8px;border-radius:8px;"
+            f"background:{t['th_bg']};border:1px solid {t['border']}'>"
+            f"<div style='font-size:0.72rem;color:{t['card_fg']}'>{name}</div>"
+            f"<div style='font-size:0.95rem;font-weight:600;color:{t['fg']}'>{val}</div>"
+            f"<div style='font-size:0.7rem;color:{t['card_fg']};white-space:nowrap;"
+            f"overflow:hidden;text-overflow:ellipsis'>{sub}</div></div>"
+        )
+    st.markdown(
+        f"<div style='display:flex;gap:8px;margin:0 0 10px 0'>{''.join(cells)}</div>",
+        unsafe_allow_html=True,
+    )
+
+
 def render_report_section():
     """渲染报告区域（含报告、图表、参考文献三个 Tab）"""
     report = st.session_state.report
@@ -1356,6 +1400,7 @@ def render_report_section():
 
     st.divider()
     st.markdown("### 综述报告")
+    _render_quality_metrics(st.session_state.get("quality_metrics") or {})
 
     # 当前报告也可手动删除（与历史列表共用同一接口）
     tid_now = st.session_state.get("thread_id") or ""

@@ -125,6 +125,9 @@ async def writer_agent(state: dict) -> dict[str, Any]:
     tool_map = {"rag_search": rag_search}
 
     # ── 构建消息 ───────────────────────────────────────────────
+    from backend.skills import pick_report_template
+
+    template_id, template_focus = pick_report_template(topic)
     messages: list = [SystemMessage(content=WRITER_SYSTEM_PROMPT)]
 
     if review_feedback:
@@ -133,7 +136,8 @@ async def writer_agent(state: dict) -> dict[str, Any]:
         messages.append(
             HumanMessage(
                 content=(
-                    f"研究主题：{topic}\n\n"
+                    f"研究主题：{topic}\n"
+                    f"报告模板：{template_id} — {template_focus}\n\n"
                     f"以下是之前的报告草稿：\n\n{existing_report}\n\n"
                     f"---\n\n"
                     f"审核修改意见：\n{review_feedback}\n\n"
@@ -147,7 +151,8 @@ async def writer_agent(state: dict) -> dict[str, Any]:
         messages.append(
             HumanMessage(
                 content=(
-                    f"研究主题：{topic}\n\n"
+                    f"研究主题：{topic}\n"
+                    f"报告模板：{template_id} — {template_focus}\n\n"
                     f"以下是分析师提供的分析数据，请据此撰写完整的文献综述报告：\n\n"
                     f"{analysis_text}\n\n"
                     f"---\n\n"

@@ -489,6 +489,7 @@ async def get_report(request: Request, thread_id: str):
             status=current_phase,
             references=values.get("references", []),
             charts=values.get("charts", []),
+            quality_metrics=values.get("quality_metrics") or {},
         )
 
     except HTTPException:
