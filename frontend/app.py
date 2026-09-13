@@ -12,7 +12,7 @@ from pathlib import Path
 # ============ 页面配置 ============
 st.set_page_config(
     page_title="Multi-Agent 文献综述助手",
-    page_icon="🏭",
+    page_icon=None,
     layout="wide",
 )
 
@@ -166,7 +166,7 @@ html, body {{
   color: {t['fg']};
 }}
 .report-md th {{
-  background: {t['th_bg']};
+  background: {t['bg']};
   font-weight: 600;
   white-space: nowrap;
 }}
@@ -273,7 +273,7 @@ def _build_toc_html(md_text: str) -> tuple[str, list[tuple[str, str]]]:
             f"{_html_escape(title)}</a>"
         )
     toc = (
-        "<nav class='toc-box'><div class='toc-title'>📑 目录导航</div>"
+        "<nav class='toc-box'><div class='toc-title'>目录导航</div>"
         + "".join(items)
         + "</nav>"
     )
@@ -317,7 +317,7 @@ def render_embedded_markdown(md_text: str, *, min_height: int = 520, max_height:
   position: sticky;
   top: 0;
   z-index: 5;
-  background: {t['th_bg']};
+  background: {t['bg']};
   border: 1px solid {t['border']};
   border-radius: 8px;
   padding: 10px 12px;
@@ -707,9 +707,9 @@ def process_stream(thread_id: str):
             _render_progress_log()
         with meta_placeholder.container():
             if writing_chars is not None:
-                st.caption(f"✍️ 正在撰写综述… 已生成 {writing_chars} 字 · 已运行 {elapsed // 60}:{elapsed % 60:02d}")
+                st.caption(f"正在撰写综述… 已生成 {writing_chars} 字 · 已运行 {elapsed // 60}:{elapsed % 60:02d}")
             else:
-                st.caption(f"⏱ 已运行 {elapsed // 60}:{elapsed % 60:02d} · 连接正常，系统处理中")
+                st.caption(f"已运行 {elapsed // 60}:{elapsed % 60:02d} · 连接正常，系统处理中")
 
     for event_type, data in consume_sse_sync(thread_id):
         if event_type == "heartbeat":
@@ -783,21 +783,21 @@ def process_stream(thread_id: str):
 def _render_phase_steps():
     """渲染阶段步骤条（固定五步，不随消息增长）"""
     phases_info = [
-        ("searching", "🔍 文献检索", "ArXiv 论文 + 网络补充资料"),
-        ("analyzing", "📊 文献分析", "方法分类、性能对比、研究空白"),
-        ("writing", "✍️ 撰写综述", "生成带引用的综述报告"),
-        ("reviewing", "👀 等待审核", "人工审核反馈"),
-        ("completed", "✅ 完成", "报告已生成"),
+        ("searching", "文献检索", "ArXiv 论文 + 网络补充资料"),
+        ("analyzing", "文献分析", "方法分类、性能对比、研究空白"),
+        ("writing", "撰写综述", "生成带引用的综述报告"),
+        ("reviewing", "等待审核", "人工审核反馈"),
+        ("completed", "完成", "报告已生成"),
     ]
     for phase_key, label, desc in phases_info:
         done = st.session_state.phases.get(phase_key, False)
         is_current = st.session_state.current_phase == phase_key and not done
         if done:
-            st.markdown(f"&nbsp;&nbsp;✅ ~~{label}~~ · {desc}")
+            st.markdown(f"&nbsp;&nbsp;[完成] ~~{label}~~ · {desc}")
         elif is_current:
-            st.markdown(f"&nbsp;&nbsp;🔄 **{label}** · {desc}")
+            st.markdown(f"&nbsp;&nbsp;[进行中] **{label}** · {desc}")
         else:
-            st.markdown(f"&nbsp;&nbsp;⚪ {label} · {desc}")
+            st.markdown(f"&nbsp;&nbsp;[待处理] {label} · {desc}")
 
 
 def _render_progress_log(max_lines: int = 24):
@@ -816,7 +816,7 @@ def _render_progress_log(max_lines: int = 24):
         <div style="max-height:220px;overflow-y:auto;border:1px solid {t['border']};
                     border-radius:8px;padding:10px 12px;font-size:0.88rem;
                     background:{t['th_bg']};color:{t['fg']}">
-          <div style="font-weight:600;margin-bottom:6px;color:{t['fg']}">📝 详细进度（最近 {len(messages)} 条）</div>
+          <div style="font-weight:600;margin-bottom:6px;color:{t['fg']}">详细进度（最近 {len(messages)} 条）</div>
           {lines}
         </div>
         """,
@@ -839,7 +839,7 @@ def render_header():
     t = _theme_tokens()
     st.markdown(f"""
     <div style="text-align: center; padding: 1rem 0;">
-        <h1 style="color:{t['fg']}">📚 Multi-Agent 文献综述助手</h1>
+        <h1 style="color:{t['fg']}">Multi-Agent 文献综述助手</h1>
         <p style="color: {t['header_sub']}; font-size: 1.1rem;">输入研究方向，自动检索文献并生成带引用的综述报告</p>
     </div>
     """, unsafe_allow_html=True)
@@ -864,11 +864,11 @@ def _render_admin_settings(admin_status: dict) -> None:
     st.markdown("##### 当前状态")
     c1, c2, c3 = st.columns(3)
     c1.markdown(
-        _card(t["ok_bg"] if llm_ok else t["bad_bg"], "✅" if llm_ok else "❌", "LLM Key"),
+        _card(t["ok_bg"] if llm_ok else t["bad_bg"], "OK" if llm_ok else "NG", "LLM Key"),
         unsafe_allow_html=True,
     )
     c2.markdown(
-        _card(t["ok_bg"] if tavily_ok else t["bad_bg"], "✅" if tavily_ok else "❌", "Tavily"),
+        _card(t["ok_bg"] if tavily_ok else t["bad_bg"], "OK" if tavily_ok else "NG", "Tavily"),
         unsafe_allow_html=True,
     )
     c3.markdown(
@@ -925,11 +925,11 @@ def _render_admin_settings(admin_status: dict) -> None:
         st.markdown("**操作**")
         b1, b2, b3 = st.columns(3)
         with b1:
-            fetch_clicked = st.form_submit_button("📋 获取模型", use_container_width=True)
+            fetch_clicked = st.form_submit_button("获取模型", use_container_width=True)
         with b2:
-            test_clicked = st.form_submit_button("🔌 测试连接", use_container_width=True)
+            test_clicked = st.form_submit_button(" 测试连接", use_container_width=True)
         with b3:
-            save_clicked = st.form_submit_button("💾 保存", use_container_width=True)
+            save_clicked = st.form_submit_button(" 保存", use_container_width=True)
 
     if fetch_clicked:
         if not admin_pwd:
@@ -948,7 +948,7 @@ def _render_admin_settings(admin_status: dict) -> None:
             else:
                 models = result.get("models", [])
                 st.session_state.remote_models = models
-                st.success(f"✅ 获取到 {len(models)} 个模型")
+                st.success(f"获取到 {len(models)} 个模型")
                 st.rerun()
 
     if test_clicked:
@@ -965,9 +965,9 @@ def _render_admin_settings(admin_status: dict) -> None:
             if result is None:
                 st.error("测试失败：后端异常")
             elif result.get("ok"):
-                st.success(f"✅ {result.get('message', '连接成功')}")
+                st.success(f"{result.get('message', '连接成功')}")
             else:
-                st.error(f"❌ 连接失败：{result.get('message', '未知错误')}")
+                st.error(f"连接失败：{result.get('message', '未知错误')}")
 
     if save_clicked:
         if not admin_pwd:
@@ -985,11 +985,11 @@ def _render_admin_settings(admin_status: dict) -> None:
             if result is None:
                 st.error("保存失败：口令错误或后端异常")
             else:
-                st.success(f"✅ {result.get('message', '配置已保存并即时生效')}")
+                st.success(f"{result.get('message', '配置已保存并即时生效')}")
 
     remote_models = st.session_state.get("remote_models") or []
     if remote_models:
-        with st.expander(f"📋 接口可用模型（{len(remote_models)} 个）", expanded=False):
+        with st.expander(f"接口可用模型（{len(remote_models)} 个）", expanded=False):
             for m in remote_models[:50]:
                 st.code(m, language=None)
             if len(remote_models) > 50:
@@ -999,17 +999,17 @@ def _render_admin_settings(admin_status: dict) -> None:
 def render_sidebar():
     """渲染侧边栏"""
     with st.sidebar:
-        st.markdown("## 📋 系统说明")
+        st.markdown("## 系统说明")
         st.markdown("""
         本系统基于 Multi-Agent 架构，自动完成文献综述：
-        - 🔍 **检索** — ArXiv 学术论文检索为主 + 网络补充资料
-        - 📊 **分析** — 方法分类、性能对比、研究空白提取 + 可视化
-        - ✍️ **撰稿** — 生成结构化文献综述报告
-        - 📚 **引用** — 自动文献引用管理
-        - ✅ **审核** — 支持人工审核反馈
+        - **检索** — ArXiv 学术论文检索为主 + 网络补充资料
+        - **分析** — 方法分类、性能对比、研究空白提取 + 可视化
+        - **撰稿** — 生成结构化文献综述报告
+        - **引用** — 自动文献引用管理
+        - **审核** — 支持人工审核反馈
         """)
         st.divider()
-        st.markdown("## 🛠 技术栈")
+        st.markdown("## 技术栈")
         st.markdown("""
         - **后端**: FastAPI + LangGraph
         - **前端**: Streamlit
@@ -1019,30 +1019,30 @@ def render_sidebar():
         st.divider()
 
         # 连接状态
-        st.markdown("## 🔗 连接状态")
+        st.markdown("## 连接状态")
         if check_health():
-            st.success("✅ 后端服务已连接")
+            st.success("后端服务已连接")
         else:
-            st.error("❌ 后端服务未启动")
+            st.error("后端服务未启动")
             st.caption(f"请确认后端运行在 `{API_BASE_URL}`")
 
         # 依赖健康面板（P2）
         deps = fetch_dependencies()
         if deps is not None:
-            with st.expander("🧩 依赖状态", expanded=False):
+            with st.expander("依赖状态", expanded=False):
                 st.caption(
-                    f"LLM：{'✅' if deps.get('llm_key_set') else '❌ 未配置 Key'}"
+                    f"LLM：{'OK' if deps.get('llm_key_set') else '未配置 Key'}"
                     f"　模型：`{deps.get('llm_model') or '-'}`"
                 )
                 if deps.get("tavily_key_set"):
-                    st.caption("Tavily：✅ 已配置")
+                    st.caption("Tavily：已配置")
                 elif deps.get("tavily_key_placeholder"):
-                    st.warning("Tavily：❌ Key 仍是占位符（网络检索不可用，仅 ArXiv）")
+                    st.warning("Tavily：Key 仍是占位符（网络检索不可用，仅 ArXiv）")
                 else:
-                    st.warning("Tavily：❌ 未配置 Key")
+                    st.warning("Tavily：未配置 Key")
                 if deps.get("llm_base_url"):
                     st.caption(f"接口：`{deps.get('llm_base_url')}`")
-                st.caption("ArXiv：✅ 默认可用（国内 PDF 可能超时）")
+                st.caption("ArXiv：默认可用（国内 PDF 可能超时）")
                 # 免 Key 学术主源（服务器实测优先）
                 acad = []
                 if deps.get("crossref_enabled"):
@@ -1054,7 +1054,7 @@ def render_sidebar():
                 if deps.get("core_enabled"):
                     acad.append("CORE")
                 if acad:
-                    st.caption("学术主源：✅ " + "、".join(acad))
+                    st.caption("学术主源：" + "、".join(acad))
                 free_parts = []
                 if deps.get("duckduckgo_enabled"):
                     free_parts.append("DuckDuckGo")
@@ -1065,18 +1065,18 @@ def render_sidebar():
                 if free_parts:
                     st.caption("其它免 Key 源：" + "、".join(free_parts) + "（部分环境可能不可达）")
                 if deps.get("searxng_reachable"):
-                    st.caption(f"自建 SearXNG：✅ `{deps.get('searxng_url')}`")
+                    st.caption(f"自建 SearXNG：`{deps.get('searxng_url')}`")
                 else:
                     st.caption("自建 SearXNG：未启动（可选）")
 
         # 历史任务（服务器持久化，刷新/退出不丢失）
         st.divider()
-        st.markdown("## 🕘 历史任务")
+        st.markdown("## 历史任务")
         history = fetch_history()
         if history:
             status_icons = {
-                "reviewing": "👀", "completed": "✅", "searching": "🔍",
-                "analyzing": "📊", "writing": "✍️", "failed": "❌",
+                "reviewing": "审", "completed": "完", "searching": "检",
+                "analyzing": "析", "writing": "撰", "failed": "败",
             }
             for item in history[:10]:
                 h_topic = (item.get("topic") or "未命名")[:24]
@@ -1097,7 +1097,7 @@ def render_sidebar():
                         _restore_task(tid, item.get("topic", ""), h_status)
                 with col_del:
                     if st.button(
-                        "🗑",
+                        "删",
                         key=f"hist-del-{tid}",
                         help=f"删除「{h_topic}」",
                     ):
@@ -1124,7 +1124,7 @@ def render_sidebar():
         admin_status = get_admin_status()
         if admin_status is None:
             return
-        with st.expander("⚙️ 系统设置", expanded=False):
+        with st.expander("系统设置", expanded=False):
             if not admin_status.get("admin_enabled"):
                 st.info("在线配置未启用：需在服务器 `.env` 中设置 `ADMIN_PASSWORD` 后重启服务。")
             else:
@@ -1159,7 +1159,7 @@ def render_input_section():
         )
     with col_btn:
         start_clicked = st.button(
-            "🚀 开始研究",
+            " 开始研究",
             use_container_width=True,
             disabled=st.session_state.task_status == "running",
         )
@@ -1193,18 +1193,18 @@ def render_input_section():
 
 def render_progress_section():
     """渲染进度区域"""
-    st.markdown("### 📊 任务进度")
+    st.markdown("### 任务进度")
 
     if st.session_state.error_message:
-        st.error(f"⚠️ {st.session_state.error_message}")
+        st.error(f"{st.session_state.error_message}")
         return
 
     phases_info = [
-        ("searching", "🔍 文献检索", "ArXiv 论文 + 网络补充资料"),
-        ("analyzing", "📊 文献分析", "方法分类、性能对比、研究空白"),
-        ("writing", "✍️ 撰写综述", "生成带引用的综述报告"),
-        ("reviewing", "👀 等待审核", "人工审核反馈"),
-        ("completed", "✅ 完成", "报告已生成"),
+        ("searching", "文献检索", "ArXiv 论文 + 网络补充资料"),
+        ("analyzing", "文献分析", "方法分类、性能对比、研究空白"),
+        ("writing", "撰写综述", "生成带引用的综述报告"),
+        ("reviewing", "等待审核", "人工审核反馈"),
+        ("completed", "完成", "报告已生成"),
     ]
 
     for phase_key, label, desc in phases_info:
@@ -1213,11 +1213,11 @@ def render_progress_section():
                       and not done)
 
         if done:
-            st.markdown(f"&nbsp;&nbsp;✅ ~~{label}~~ · {desc}")
+            st.markdown(f"&nbsp;&nbsp;[完成] ~~{label}~~ · {desc}")
         elif is_current:
-            st.markdown(f"&nbsp;&nbsp;🔄 **{label}** · {desc}")
+            st.markdown(f"&nbsp;&nbsp;[进行中] **{label}** · {desc}")
         else:
-            st.markdown(f"&nbsp;&nbsp;⚪ {label} · {desc}")
+            st.markdown(f"&nbsp;&nbsp;[待处理] {label} · {desc}")
 
     # 显示进度消息（固定高度滚动容器，页面不被撑长）
     _render_progress_log()
@@ -1225,7 +1225,7 @@ def render_progress_section():
 
 def _render_progress_ui():
     """在流式处理过程中渲染进度 UI（兼容旧调用）"""
-    st.markdown("### 📊 任务进度")
+    st.markdown("### 任务进度")
     _render_phase_steps()
     _render_progress_log()
 
@@ -1239,14 +1239,14 @@ def render_report_section():
         return
 
     st.divider()
-    st.markdown("### 📝 综述报告")
+    st.markdown("### 综述报告")
 
     # 当前报告也可手动删除（与历史列表共用同一接口）
     tid_now = st.session_state.get("thread_id") or ""
     if tid_now and st.session_state.task_status in ("completed", "reviewing"):
         col_title, col_del = st.columns([6, 1])
         with col_del:
-            if st.button("🗑 删除报告", key="del-current-report"):
+            if st.button("删除报告", key="del-current-report"):
                 if delete_history(tid_now):
                     st.session_state.thread_id = None
                     st.session_state.report = ""
@@ -1264,7 +1264,7 @@ def render_report_section():
     if report:
         # 最终报告 — 使用 Tabs 组织内容
         tab_report, tab_charts, tab_refs = st.tabs(
-            ["📄 综述报告", "📊 数据图表", "📚 参考文献"]
+            ["综述报告", "数据图表", "参考文献"]
         )
 
         with tab_report:
@@ -1275,7 +1275,7 @@ def render_report_section():
             # 下载按钮
             st.divider()
             st.download_button(
-                label="📥 下载报告 (.md)",
+                label="下载报告 (.md)",
                 data=report,
                 file_name=f"research_{st.session_state.topic}.md",
                 mime="text/markdown",
@@ -1290,7 +1290,7 @@ def render_report_section():
 
     elif draft:
         # 审核中的草稿
-        st.info("📋 以下是报告草稿，请审核后决定是否通过：")
+        st.info("以下是报告草稿，请审核后决定是否通过：")
         render_embedded_markdown(draft)
 
 
@@ -1385,7 +1385,7 @@ def render_review_section():
         return
 
     st.divider()
-    st.markdown("### ✅ 人工审核")
+    st.markdown("### 人工审核")
 
     col_feedback, col_actions = st.columns([3, 1])
 
@@ -1398,12 +1398,12 @@ def render_review_section():
 
     with col_actions:
         approve_clicked = st.button(
-            "✅ 通过",
+            "通过",
             use_container_width=True,
             disabled=not feedback.strip(),
         )
         revise_clicked = st.button(
-            "🔄 返工",
+            "返工",
             use_container_width=True,
             disabled=not feedback.strip(),
         )
@@ -1435,7 +1435,7 @@ def _do_review(feedback: str):
         return
 
     if status == "approved":
-        st.success(f"✅ 审核通过！{message}")
+        st.success(f"审核通过！{message}")
         st.session_state.is_reviewing = False
         st.session_state.task_status = "completed"
         # 获取最终报告（含 references / charts）
@@ -1446,7 +1446,7 @@ def _do_review(feedback: str):
             st.session_state.charts = report_data.get("charts", [])
         st.rerun()
     elif status == "revising":
-        st.info(f"🔄 已提交修改意见，正在返工... {message}")
+        st.info(f"已提交修改意见，正在返工... {message}")
         st.session_state.is_reviewing = False
         st.session_state.task_status = "running"
         st.session_state.report_draft = ""
@@ -1488,7 +1488,7 @@ def main():
         # 任务完成后提供重新开始的按钮
         if st.session_state.task_status == "completed":
             st.divider()
-            if st.button("🔄 开始新的研究", use_container_width=True):
+            if st.button("开始新的研究", use_container_width=True):
                 _reset_state()
                 st.rerun()
 
