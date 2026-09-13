@@ -333,13 +333,16 @@ def render_embedded_markdown(md_text: str, *, min_height: int = 520, max_height:
 }}
 .toc-link {{
   display: block;
-  color: {t['accent']};
+  color: {t['fg']};
   text-decoration: none;
   font-size: 0.88rem;
   line-height: 1.55;
   padding: 2px 0;
 }}
-.toc-link:hover {{ text-decoration: underline; }}
+.toc-link:hover {{
+  text-decoration: underline;
+  color: {t['fg']};
+}}
 .report-md h1, .report-md h2, .report-md h3 {{ scroll-margin-top: 200px; }}
 </style>
 <script>
@@ -702,7 +705,7 @@ def process_stream(thread_id: str):
         last_render = now
         elapsed = int(now - t0)
         with phases_placeholder.container():
-            _render_phase_steps()
+            _phase_step_rows()
         with log_placeholder.container():
             _render_progress_log()
         with meta_placeholder.container():
@@ -780,24 +783,108 @@ def process_stream(thread_id: str):
             break
 
 
-def _render_phase_steps():
-    """渲染阶段步骤条（固定五步，不随消息增长）"""
+def _svg_status_icon(kind: str, *, size: int = 18) -> str:
+    """纯 CSS/SVG 状态图标（无 emoji）：done / run / wait / fail / review / search / write / analyze"""
+    s = size
+    common = (
+        f'width="{s}" height="{s}" viewBox="0 0 24 24" fill="none" '
+        f'style="vertical-align:-3px;flex-shrink:0" aria-hidden="true"'
+    )
+    if kind == "done":
+        return (
+            f"<svg {common}>"
+            f'<circle cx="12" cy="12" r="10" fill="#22c55e"/>'
+            f'<path d="M7.5 12.5l3 3 6-7" stroke="#fff" stroke-width="2.2" '
+            f'stroke-linecap="round" stroke-linejoin="round"/>'
+            f"</svg>"
+        )
+    if kind == "fail":
+        return (
+            f"<svg {common}>"
+            f'<circle cx="12" cy="12" r="10" fill="#ef4444"/>'
+            f'<path d="M8 8l8 8M16 8l-8 8" stroke="#fff" stroke-width="2.2" stroke-linecap="round"/>'
+            f"</svg>"
+        )
+    if kind == "wait":
+        return (
+            f"<svg {common}>"
+            f'<circle cx="12" cy="12" r="9" stroke="#94a3b8" stroke-width="2"/>'
+            f"</svg>"
+        )
+    if kind in ("run", "search", "analyze", "write"):
+        # 旋转进度环 + 内点
+        inner = {
+            "search": '<circle cx="12" cy="12" r="3" fill="#3b82f6"/>',
+            "analyze": '<path d="M8 15V10M12 15V7M16 15v-3" stroke="#3b82f6" stroke-width="2" stroke-linecap="round"/>',
+            "write": '<path d="M8 16l2.5-.5L18 8l-2-2-7.5 7.5L8 16z" stroke="#3b82f6" stroke-width="1.6" stroke-linejoin="round"/>',
+            "run": '<circle cx="12" cy="12" r="3.5" fill="#3b82f6"/>',
+        }.get(kind, '<circle cx="12" cy="12" r="3" fill="#3b82f6"/>')
+        return (
+            f"<svg {common}>"
+            f'<circle class="st-spin" cx="12" cy="12" r="9" stroke="#3b82f6" stroke-width="2.4" '
+            f'stroke-linecap="round" stroke-dasharray="40 20" opacity="0.9"/>'
+            f"{inner}"
+            f"</svg>"
+        )
+    if kind == "review":
+        return (
+            f"<svg {common}>"
+            f'<circle cx="12" cy="12" r="9" stroke="#f59e0b" stroke-width="2"/>'
+            f'<circle cx="12" cy="12" r="3.2" fill="#f59e0b"/>'
+            f"</svg>"
+        )
+    # 默认空心
+    return (
+        f"<svg {common}>"
+        f'<circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="2" opacity="0.45"/>'
+        f"</svg>"
+    )
+
+
+def _status_icon_css() -> str:
+    return """
+<style>
+.st-spin { transform-origin: 12px 12px; animation: st-rot 1.1s linear infinite; }
+@keyframes st-rot { to { transform: rotate(360deg); } }
+.st-row { display:flex; align-items:center; gap:8px; }
+.st-badge {
+  display:inline-flex; align-items:center; justify-content:center;
+  width:22px; height:22px; border-radius:50%;
+}
+</style>
+"""
+
+
+def _phase_step_rows() -> None:
+    """阶段步骤：SVG 动态图标 + 文案"""
     phases_info = [
-        ("searching", "文献检索", "ArXiv 论文 + 网络补充资料"),
-        ("analyzing", "文献分析", "方法分类、性能对比、研究空白"),
-        ("writing", "撰写综述", "生成带引用的综述报告"),
-        ("reviewing", "等待审核", "人工审核反馈"),
-        ("completed", "完成", "报告已生成"),
+        ("searching", "文献检索", "ArXiv / Crossref / OpenAlex 等学术源", "search"),
+        ("analyzing", "文献分析", "方法分类、性能对比、研究空白", "analyze"),
+        ("writing", "撰写综述", "生成带引用的综述报告", "write"),
+        ("reviewing", "等待审核", "人工审核反馈", "review"),
+        ("completed", "完成", "报告已生成", "done"),
     ]
-    for phase_key, label, desc in phases_info:
+    st.markdown(_status_icon_css(), unsafe_allow_html=True)
+    for phase_key, label, desc, icon_kind in phases_info:
         done = st.session_state.phases.get(phase_key, False)
         is_current = st.session_state.current_phase == phase_key and not done
+        if st.session_state.task_status == "error" and phase_key == "completed" and not done:
+            # 失败时不点亮完成，而是在当前阶段显示失败感（由 error_message 负责）
+            pass
         if done:
-            st.markdown(f"&nbsp;&nbsp;[完成] ~~{label}~~ · {desc}")
+            icon = _svg_status_icon("done")
+            title = f"<span style='text-decoration:line-through;opacity:.85'>{label}</span>"
         elif is_current:
-            st.markdown(f"&nbsp;&nbsp;[进行中] **{label}** · {desc}")
+            icon = _svg_status_icon(icon_kind)
+            title = f"<strong>{label}</strong>"
         else:
-            st.markdown(f"&nbsp;&nbsp;[待处理] {label} · {desc}")
+            icon = _svg_status_icon("wait")
+            title = f"<span style='opacity:.75'>{label}</span>"
+        st.markdown(
+            f"<div class='st-row' style='margin:4px 0'>{icon}<div>"
+            f"{title} <span style='opacity:.65;font-size:0.9em'>· {desc}</span></div></div>",
+            unsafe_allow_html=True,
+        )
 
 
 def _render_progress_log(max_lines: int = 24):
@@ -864,11 +951,19 @@ def _render_admin_settings(admin_status: dict) -> None:
     st.markdown("##### 当前状态")
     c1, c2, c3 = st.columns(3)
     c1.markdown(
-        _card(t["ok_bg"] if llm_ok else t["bad_bg"], "OK" if llm_ok else "NG", "LLM Key"),
+        _card(
+            t["ok_bg"] if llm_ok else t["bad_bg"],
+            _svg_status_icon("done" if llm_ok else "fail"),
+            "LLM Key",
+        ),
         unsafe_allow_html=True,
     )
     c2.markdown(
-        _card(t["ok_bg"] if tavily_ok else t["bad_bg"], "OK" if tavily_ok else "NG", "Tavily"),
+        _card(
+            t["ok_bg"] if tavily_ok else t["bad_bg"],
+            _svg_status_icon("done" if tavily_ok else "fail"),
+            "Tavily",
+        ),
         unsafe_allow_html=True,
     )
     c3.markdown(
@@ -1074,27 +1169,36 @@ def render_sidebar():
         st.markdown("## 历史任务")
         history = fetch_history()
         if history:
-            status_icons = {
-                "reviewing": "审", "completed": "完", "searching": "检",
-                "analyzing": "析", "writing": "撰", "failed": "败",
+            st.markdown(_status_icon_css(), unsafe_allow_html=True)
+            status_kind = {
+                "reviewing": "review",
+                "completed": "done",
+                "searching": "search",
+                "analyzing": "analyze",
+                "writing": "write",
+                "failed": "fail",
             }
             for item in history[:10]:
                 h_topic = (item.get("topic") or "未命名")[:24]
                 h_status = item.get("status", "")
                 tid = item.get("thread_id", "")
-                icon = status_icons.get(h_status, "•")
+                kind = status_kind.get(h_status, "wait")
                 h_time = item.get("updated_at") or ""
-                label = f"{icon} {h_topic}"
-                if h_time:
-                    label = f"{label}  ·  {h_time}"
+                time_suf = f"  ·  {h_time}" if h_time else ""
                 col_open, col_del = st.columns([5, 1])
                 with col_open:
+                    # 用 HTML 图标 + 文字；按钮仍用纯文本避免 emoji
                     if st.button(
-                        label,
+                        f"{h_topic}{time_suf}",
                         key=f"hist-{tid}",
                         use_container_width=True,
                     ):
                         _restore_task(tid, item.get("topic", ""), h_status)
+                    st.markdown(
+                        f"<div class='st-row' style='margin:-2px 0 6px 0;font-size:0.78rem;opacity:.85'>"
+                        f"{_svg_status_icon(kind, size=14)}<span>{h_status or '-'}</span></div>",
+                        unsafe_allow_html=True,
+                    )
                 with col_del:
                     if st.button(
                         "删",
@@ -1199,25 +1303,7 @@ def render_progress_section():
         st.error(f"{st.session_state.error_message}")
         return
 
-    phases_info = [
-        ("searching", "文献检索", "ArXiv 论文 + 网络补充资料"),
-        ("analyzing", "文献分析", "方法分类、性能对比、研究空白"),
-        ("writing", "撰写综述", "生成带引用的综述报告"),
-        ("reviewing", "等待审核", "人工审核反馈"),
-        ("completed", "完成", "报告已生成"),
-    ]
-
-    for phase_key, label, desc in phases_info:
-        done = st.session_state.phases.get(phase_key, False)
-        is_current = (st.session_state.current_phase == phase_key
-                      and not done)
-
-        if done:
-            st.markdown(f"&nbsp;&nbsp;[完成] ~~{label}~~ · {desc}")
-        elif is_current:
-            st.markdown(f"&nbsp;&nbsp;[进行中] **{label}** · {desc}")
-        else:
-            st.markdown(f"&nbsp;&nbsp;[待处理] {label} · {desc}")
+    _phase_step_rows()
 
     # 显示进度消息（固定高度滚动容器，页面不被撑长）
     _render_progress_log()
@@ -1226,7 +1312,7 @@ def render_progress_section():
 def _render_progress_ui():
     """在流式处理过程中渲染进度 UI（兼容旧调用）"""
     st.markdown("### 任务进度")
-    _render_phase_steps()
+    _phase_step_rows()
     _render_progress_log()
 
 
