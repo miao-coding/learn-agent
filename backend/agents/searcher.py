@@ -333,25 +333,11 @@ async def searcher_agent(state: dict, config: RunnableConfig) -> dict[str, Any]:
     except Exception as e:
         logger.warning(f"向量数据库存储失败（不影响主流程）: {e}")
 
-    # ── 构建引用条目（解析 title/url/date，供前端与对账使用） ──
-    from backend.utils.citations import extract_reference_meta
+    # ── 构建引用条目：多篇切分 + 真实 title/url，禁止 query 冒充标题 ──
+    from backend.utils.citations import build_references_from_search_results
 
-    references: list[dict[str, Any]] = []
-    ref_id = 1
-    for item in search_results:
-        meta = extract_reference_meta(
-            item.get("source", "web"),
-            str(item.get("content", "")),
-            item.get("query", ""),
-        )
-        references.append({
-            "id": ref_id,
-            "title": meta["title"],
-            "url": meta["url"],
-            "source": meta["source"],
-            "date": meta["date"],
-        })
-        ref_id += 1
+    references = build_references_from_search_results(search_results)
+    logger.info(f"从检索结果构建真实文献 {len(references)} 条")
 
     # ── 让 LLM 做最终总结 ──────────────────────────────────────
     messages.append(HumanMessage(content="请总结你搜索到的所有信息，按类别整理输出。请明确区分网络来源（web）和学术来源（arxiv/arxiv_pdf），分别列出。"))

@@ -2,8 +2,9 @@
 
 原则（用户明确要求）：
 - 文献列表只能来自检索结果，禁止补「未命名来源」占位
+- 禁止用检索 query 冒充论文标题
 - 正文中列表外的 [n] 视为模型编造，必须从正文删除
-- 报告末尾的「参考文献」章节用真实列表整体重写
+- 参考文献章节用真实列表重编号后整体重写
 """
 from __future__ import annotations
 
@@ -11,19 +12,35 @@ import re
 from typing import Any
 
 
+def _is_plausible_title(title: str, query: str = "") -> bool:
+    t = (title or "").strip()
+    if len(t) < 8:
+        return False
+    low = t.lower()
+    bad = ("未命名", "未知来源", "未知标题", "搜索失败", "未找到", "error", "failed")
+    if any(b in low for b in bad):
+        return False
+    q = (query or "").strip().lower()
+    # 与 query 完全相同 → 不是论文标题
+    if q and t.lower() == q:
+        return False
+    return True
+
+
 def extract_reference_meta(
     source: str, content: str, query: str = ""
 ) -> dict[str, str]:
-    """从检索工具返回文本中尽量抽出 title / url / date
+    """从单条检索结果块中抽出 title / url / date
 
-    arXiv 格式：
+    arXiv：
         [1] Title
             作者: ...
             日期: 2024-03-01
             arXiv ID: 2301.12345
-    Scholar / DDG 格式：
+    Crossref/Scholar/DDG：
         [1] Title
             URL: https://...
+            DOI: 10.xxxx/yyy
     """
     text = str(content or "")
     title = ""
@@ -36,12 +53,13 @@ def extract_reference_meta(
             continue
         m = re.match(r"^\[\d+\]\s*(.+)$", line)
         if m:
-            title = m.group(1).strip()[:180]
+            title = m.group(1).strip()[:200]
             break
         if line.lower().startswith("title:"):
-            title = line.split(":", 1)[1].strip()[:180]
+            title = line.split(":", 1)[1].strip()[:200]
             break
 
+    # URL / arXiv / DOI
     m = re.search(r"arXiv ID:\s*([0-9]{4}\.[0-9]{4,5}(v\d+)?)", text)
     if m:
         url = f"https://arxiv.org/abs/{m.group(1)}"
@@ -50,22 +68,102 @@ def extract_reference_meta(
         if m:
             url = f"https://arxiv.org/abs/{m.group(1)}"
         else:
-            m = re.search(r"URL:\s*(https?://\S+)", text)
+            m = re.search(r"DOI:\s*(10\.\d{4,9}/\S+)", text, re.I)
             if m:
-                url = m.group(1).rstrip("),.;")
+                doi = m.group(1).rstrip(".,;)")
+                url = f"https://doi.org/{doi}"
+            else:
+                m = re.search(r"https?://doi\.org/(10\.\d{4,9}/\S+)", text, re.I)
+                if m:
+                    url = f"https://doi.org/{m.group(1).rstrip('.,;)')}"
+                else:
+                    m = re.search(r"URL:\s*(https?://\S+)", text)
+                    if m:
+                        url = m.group(1).rstrip("),.;")
 
     m = re.search(r"日期:\s*([0-9]{4}-[0-9]{2}-[0-9]{2})", text)
     if m:
         date = m.group(1)
     else:
-        m = re.search(r"date:\s*([0-9]{4}-[0-9]{2}-[0-9]{2})", text, re.I)
+        m = re.search(r"年份:\s*([0-9]{4})", text)
         if m:
             date = m.group(1)
+        else:
+            m = re.search(r"date:\s*([0-9]{4}-[0-9]{2}-[0-9]{2})", text, re.I)
+            if m:
+                date = m.group(1)
 
-    if not title:
-        title = (query or "未知来源")[:180]
+    # 不再用 query 冒充标题；无标题则留空，由调用方决定是否丢弃
+    return {
+        "title": title if _is_plausible_title(title, query) else "",
+        "url": url,
+        "date": date,
+        "source": source or "web",
+    }
 
-    return {"title": title, "url": url, "date": date, "source": source or "web"}
+
+def split_search_result_entries(content: str) -> list[str]:
+    """把一次检索返回的多篇论文块切成列表
+
+    形如：
+        [1] TitleA\n...\n[2] TitleB\n...
+    """
+    text = str(content or "")
+    if not text.strip():
+        return []
+    # 去掉尾部「（来源: xxx）」
+    text = re.sub(r"（来源:\s*[^）]+）\s*$", "", text.strip())
+    parts = re.split(r"(?m)^(?=\[\d+\]\s+)", text)
+    parts = [p.strip() for p in parts if p.strip()]
+    if len(parts) == 1 and not parts[0].startswith("["):
+        return [parts[0]]
+    return parts
+
+
+def build_references_from_search_results(
+    search_results: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """将检索员结果转成带真实 title/url 的 references（连续 1..N）
+
+    - 每条 search_result 的 content 可能含多篇论文
+    - 丢弃无标题且无 URL 的块
+    """
+    refs: list[dict[str, Any]] = []
+    seen_keys: set[str] = set()
+    rid = 1
+    for item in search_results or []:
+        source = str(item.get("source") or "web")
+        query = str(item.get("query") or "")
+        content = str(item.get("content") or item.get("result") or "")
+        if not content.strip():
+            continue
+        if any(x in content for x in ("搜索失败", "配置错误", "Unauthorized", "限流冷却")):
+            continue
+        for block in split_search_result_entries(content):
+            meta = extract_reference_meta(source, block, query)
+            title = meta.get("title") or ""
+            url = meta.get("url") or ""
+            # 至少要有可信标题，或有 URL/DOI/arXiv
+            if not title and not url:
+                continue
+            if not title and url:
+                # 用 URL 末段作弱标题，避免「未知」
+                title = url.rstrip("/").split("/")[-1][:80] or "文献"
+            key = (url or title).lower()
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            refs.append(
+                {
+                    "id": rid,
+                    "title": title[:200],
+                    "url": url,
+                    "source": source,
+                    "date": meta.get("date") or "",
+                }
+            )
+            rid += 1
+    return refs
 
 
 def parse_body_citations(report: str, stop_at_references: bool = True) -> list[int]:
@@ -83,21 +181,18 @@ def parse_body_citations(report: str, stop_at_references: bool = True) -> list[i
     return sorted(ids)
 
 
-def strip_invalid_citations(report: str, valid_ids: set[int]) -> tuple[str, int]:
-    """删除正文（参考文献章节之前）中不在 valid_ids 的 [n] 引用
+def _split_refs_section(report: str) -> tuple[str, str]:
+    m = re.search(r"(?m)^##\s*(参考文献|References|Bibliography)\s*$", report or "", re.I)
+    if not m:
+        return report or "", ""
+    return report[: m.start()], report[m.start() :]
 
-    Returns:
-        (清洗后的报告, 删除的引用次数)
-    """
+
+def strip_invalid_citations(report: str, valid_ids: set[int]) -> tuple[str, int]:
+    """删除正文（参考文献章节之前）中不在 valid_ids 的 [n] 引用"""
     if not report:
         return report, 0
-
-    m = re.search(r"(?m)^##\s*(参考文献|References|Bibliography)\s*$", report, re.I)
-    if m:
-        head, tail = report[: m.start()], report[m.start() :]
-    else:
-        head, tail = report, ""
-
+    head, tail = _split_refs_section(report)
     removed = 0
 
     def _repl(match: re.Match) -> str:
@@ -108,11 +203,49 @@ def strip_invalid_citations(report: str, valid_ids: set[int]) -> tuple[str, int]
         removed += 1
         return ""
 
-    head_new = re.sub(r"\s*\[(\d+)(?:-\d+)?\]", _repl, head)
-    # 清理连续空白
+    head_new = re.sub(r"\[(\d+)(?:-\d+)?\]", _repl, head)
     head_new = re.sub(r"[ \t]{2,}", " ", head_new)
     head_new = re.sub(r"\n{3,}", "\n\n", head_new)
     return head_new + tail, removed
+
+
+def remap_body_citations(report: str, id_map: dict[int, int]) -> str:
+    """按 old→new 映射重写正文引用编号（参考文献章节前）"""
+    if not report or not id_map:
+        return report
+    head, tail = _split_refs_section(report)
+
+    def _repl(match: re.Match) -> str:
+        n = int(match.group(1))
+        new = id_map.get(n)
+        if new is None:
+            return ""
+        sub = match.group(2) or ""
+        return f"[{new}{sub}]"
+
+    head_new = re.sub(r"\[(\d+)(-\d+)?\]", _repl, head)
+    head_new = re.sub(r"[ \t]{2,}", " ", head_new)
+    head_new = re.sub(r"\n{3,}", "\n\n", head_new)
+    return head_new + tail
+
+
+def filter_real_references(references: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """只保留可视为真实检索产物的条目"""
+    out = []
+    for r in references or []:
+        if not r or r.get("id") is None:
+            continue
+        title = str(r.get("title") or "")
+        url = str(r.get("url") or "")
+        source = str(r.get("source") or "")
+        if source in ("unknown", ""):
+            continue
+        if "未命名" in title or "未知来源" in title:
+            continue
+        if not _is_plausible_title(title) and not url:
+            continue
+        out.append(r)
+    return out
 
 
 def format_references_section(references: list[dict[str, Any]]) -> str:
@@ -121,7 +254,7 @@ def format_references_section(references: list[dict[str, Any]]) -> str:
     refs = sorted(references or [], key=lambda r: int(r.get("id", 0)))
     for r in refs:
         rid = r.get("id", "")
-        title = r.get("title") or "未知标题"
+        title = r.get("title") or "文献"
         url = r.get("url") or ""
         source = r.get("source") or ""
         date = r.get("date") or ""
@@ -137,51 +270,52 @@ def format_references_section(references: list[dict[str, Any]]) -> str:
 
 def replace_references_section(report: str, references: list[dict[str, Any]]) -> str:
     """把报告中的参考文献章节整体替换为真实列表；没有则追加"""
-    real_refs = [r for r in (references or []) if r.get("title") and "未命名" not in str(r.get("title"))]
-    section = format_references_section(real_refs)
+    section = format_references_section(references)
     if not report:
         return section
-
-    m = re.search(r"(?m)^##\s*(参考文献|References|Bibliography)\s*$", report, re.I)
-    if m:
-        return report[: m.start()].rstrip() + "\n\n" + section
-    return report.rstrip() + "\n\n" + section
+    head, _ = _split_refs_section(report)
+    return head.rstrip() + "\n\n" + section
 
 
 def reconcile_references(
     report: str, references: list[dict[str, Any]]
 ) -> tuple[str, list[dict[str, Any]], list[str]]:
-    """保证「正文编号 ⊆ 真实 references」，并重写参考文献章节
+    """强制「正文引用 ⊆ 真实 references」
 
-    策略：
-    1. 只保留真实 references（过滤「未命名」占位）
-    2. 删除正文中列表外的 [n]（模型编造）
-    3. 用真实列表重写「参考文献」章节
+    1. 过滤非法/占位条目  
+    2. 重编号 1..N 并映射正文  
+    3. 删除映射后仍无效的 [n]  
+    4. 重写参考文献章节  
 
     Returns:
         (清洗后的 report, 真实 references 列表, 问题说明)
     """
-    refs = [
-        r
-        for r in (references or [])
-        if r.get("id") is not None
-        and r.get("title")
-        and "未命名" not in str(r.get("title"))
-        and str(r.get("source") or "") != "unknown"
-    ]
-    refs = sorted(refs, key=lambda r: int(r.get("id", 0)))
-    valid_ids = {int(r["id"]) for r in refs}
+    raw = filter_real_references(references)
     issues: list[str] = []
 
-    cleaned, removed = strip_invalid_citations(report, valid_ids)
+    # 仅保留在正文中出现过的编号（按原 id），避免列表塞入从未引用的可疑条目
+    body_ids = set(parse_body_citations(report))
+    used = [r for r in raw if int(r["id"]) in body_ids] if body_ids else list(raw)
+    if body_ids and len(used) < len(raw):
+        issues.append(f"丢弃 {len(raw) - len(used)} 条正文未引用的列表项")
+
+    # 重编号 1..N
+    id_map: dict[int, int] = {}
+    renumbered: list[dict[str, Any]] = []
+    for i, r in enumerate(used, 1):
+        old = int(r["id"])
+        id_map[old] = i
+        item = dict(r)
+        item["id"] = i
+        renumbered.append(item)
+
+    cleaned = remap_body_citations(report or "", id_map)
+    valid_ids = set(range(1, len(renumbered) + 1))
+    cleaned, removed = strip_invalid_citations(cleaned, valid_ids)
     if removed:
-        issues.append(f"删除正文中 {removed} 处列表外/编造引用编号")
+        issues.append(f"删除正文中 {removed} 处无法映射到真实文献的引用编号")
 
-    cleaned = replace_references_section(cleaned, refs)
-    issues.append(f"参考文献章节已用真实检索列表重写（{len(refs)} 条）")
+    cleaned = replace_references_section(cleaned, renumbered)
+    issues.append(f"参考文献已重编号并重写（{len(renumbered)} 条真实文献）")
 
-    # 编号若不连续（1..N）仅提示，不重排以免与正文错位
-    if valid_ids and max(valid_ids) != len(refs):
-        issues.append(f"引用编号不连续，当前有效编号集合: {sorted(valid_ids)[:20]}")
-
-    return cleaned, refs, issues
+    return cleaned, renumbered, issues
