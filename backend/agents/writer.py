@@ -230,16 +230,46 @@ async def writer_agent(state: dict) -> dict[str, Any]:
         }
 
     # ── 正文引用编号与文献列表对账（只保留真实文献）────────────
+    from backend.skills import validate_report_structure
     from backend.utils.citations import reconcile_references
+    from backend.utils.quality import quality_score_report, should_retry_report
 
     report_draft, real_refs, cite_issues = reconcile_references(report_draft, references)
     if cite_issues:
         logger.warning(f"引用对账: {cite_issues}")
 
+    # ── 结构校验 + 质量分；过低再逼一次重写 ─────────────────────
+    struct_issues = validate_report_structure(report_draft)
+    q_rep = quality_score_report(report_draft, real_refs)
+    if should_retry_report(q_rep):
+        logger.warning(f"报告质量分偏低 {q_rep}，尝试一次结构化重写")
+        messages.append(
+            HumanMessage(
+                content=(
+                    "上一版未通过结构质量门禁，问题："
+                    + "；".join((q_rep.get("issues") or struct_issues)[:8])
+                    + "。请输出完整综述：必须含摘要/引言/研究现状/方法/挑战/总结/参考文献，"
+                    "且仅使用提供的真实文献编号。"
+                )
+            )
+        )
+        try:
+            retry = await llm_with_tools.ainvoke(messages)
+            retry_text = _strip_llm_preamble(str(retry.content or "").strip())
+            retry_text, real_refs, _ = reconcile_references(retry_text, real_refs or references)
+            q2 = quality_score_report(retry_text, real_refs)
+            if q2.get("score", 0) > q_rep.get("score", 0):
+                report_draft = retry_text
+                q_rep = q2
+                logger.info(f"结构化重写后质量分: {q_rep.get('score')}")
+        except Exception as e:
+            logger.warning(f"结构化重写失败: {e}")
+
     return {
         "report_draft": report_draft,
         "current_phase": "reviewing",
         "references": real_refs,
+        "quality_metrics": {"report": q_rep},
         "messages": [msg],
     }
 

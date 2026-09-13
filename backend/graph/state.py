@@ -53,3 +53,6 @@ class AgentState(TypedDict):
 
     # ── 生成的图表路径列表 ───────────────────────────────────────
     charts: list[str]
+
+    # ── 质量评分（Supervisor 门禁 / 日志，可选） ─────────────────
+    quality_metrics: dict[str, Any]

@@ -131,12 +131,16 @@ async def searcher_agent(state: dict, config: RunnableConfig) -> dict[str, Any]:
         HumanMessage(content=f"请围绕以下研究方向进行全面文献检索：{topic}"),
     ]
 
-    # ── 工具调用循环（最多 6 轮，降低 ArXiv 压力） ─────────────
+    # ── 工具调用循环：预算来自 LIT_SEARCH Skill ──────────────────
+    from backend.skills import LIT_SEARCH
+    from backend.utils.quality import quality_score_search, should_fail_search
+
+    skill = LIT_SEARCH
+    tool_budgets = dict(skill.policy.tool_budgets)
     all_search_results: list[dict[str, Any]] = []
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     tool_failures: list[str] = []
     seen_arxiv_queries: set[str] = set()
-    arxiv_call_budget = 4
     arxiv_downloaded = 0
 
     for i in range(6):
@@ -166,7 +170,18 @@ async def searcher_agent(state: dict, config: RunnableConfig) -> dict[str, Any]:
                 _arg_hint = tool_args.get("query") or tool_args.get("paper_id") or tool_args.get("urls") or ""
                 await report_progress(config, f"🛠 调用 {tool_name}：{_arg_hint}")
 
-                # ArXiv 去重 + 预算，避免同一 query 反复 429
+                # Skill 预算：超限跳过
+                budget_left = tool_budgets.get(tool_name)
+                if budget_left is not None and budget_left <= 0:
+                    await report_progress(config, f"⏭ {tool_name} 预算已用尽，跳过")
+                    messages.append(
+                        ToolMessage(
+                            content=f"{tool_name} 本任务调用预算已用尽，请换工具或结束检索",
+                            tool_call_id=tool_call["id"],
+                        )
+                    )
+                    continue
+
                 if tool_name == "arxiv_search":
                     qkey = str(tool_args.get("query", "")).strip().lower()
                     if qkey in seen_arxiv_queries:
@@ -178,20 +193,10 @@ async def searcher_agent(state: dict, config: RunnableConfig) -> dict[str, Any]:
                             )
                         )
                         continue
-                    if arxiv_call_budget <= 0:
-                        await report_progress(config, "⏭ 本任务 ArXiv 查询次数已用尽，跳过")
-                        messages.append(
-                            ToolMessage(
-                                content="本任务 ArXiv 查询预算已用尽，请基于已有结果总结",
-                                tool_call_id=tool_call["id"],
-                            )
-                        )
-                        continue
                     seen_arxiv_queries.add(qkey)
-                    arxiv_call_budget -= 1
 
                 if tool_name == "arxiv_download":
-                    if arxiv_downloaded >= 1:
+                    if arxiv_downloaded >= tool_budgets.get("arxiv_download", 1):
                         messages.append(
                             ToolMessage(
                                 content="本任务最多下载 1 篇全文，请使用已有摘要",
@@ -200,6 +205,9 @@ async def searcher_agent(state: dict, config: RunnableConfig) -> dict[str, Any]:
                         )
                         continue
                     arxiv_downloaded += 1
+
+                if budget_left is not None:
+                    tool_budgets[tool_name] = budget_left - 1
 
                 try:
                     # 同步工具放线程池执行，避免阻塞事件循环
@@ -213,9 +221,8 @@ async def searcher_agent(state: dict, config: RunnableConfig) -> dict[str, Any]:
                         fail_hint = result_text.strip().splitlines()[0][:120] if result_text.strip() else "未知错误"
                         tool_failures.append(f"{tool_name}: {fail_hint}")
                         await report_progress(config, f"⚠️ {tool_name} 失败：{fail_hint}")
-                        # ArXiv 429：停止后续 ArXiv 调用
                         if "429" in result_text or "限流" in result_text or "冷却" in result_text:
-                            arxiv_call_budget = 0
+                            tool_budgets["arxiv_search"] = 0
                         continue
                     # 记录搜索结果（按工具映射来源类型）
                     source_map = {
@@ -339,6 +346,24 @@ async def searcher_agent(state: dict, config: RunnableConfig) -> dict[str, Any]:
     references = build_references_from_search_results(search_results)
     logger.info(f"从检索结果构建真实文献 {len(references)} 条")
 
+    # ── Supervisor 质量门禁：真实文献过少 → failed ──────────────
+    q_search = quality_score_search(search_results, references)
+    if should_fail_search(q_search, min_score=0.2):
+        err = (
+            f"检索质量不足（真实文献 {q_search.get('references_count')} 条，"
+            f"score={q_search.get('score')}）。issues: {'; '.join(q_search.get('issues') or [])}"
+        )
+        logger.error(err)
+        await report_progress(config, f"❌ {err}")
+        return {
+            "search_results": search_results,
+            "current_phase": "failed",
+            "references": references,
+            "report_draft": f"# {topic}\n\n> 任务失败：{err}",
+            "quality_metrics": {"search": q_search},
+            "messages": [HumanMessage(content=err)],
+        }
+
     # ── 让 LLM 做最终总结 ──────────────────────────────────────
     messages.append(HumanMessage(content="请总结你搜索到的所有信息，按类别整理输出。请明确区分网络来源（web）和学术来源（arxiv/arxiv_pdf），分别列出。"))
     try:
@@ -351,5 +376,6 @@ async def searcher_agent(state: dict, config: RunnableConfig) -> dict[str, Any]:
         "search_results": search_results,
         "current_phase": "analyzing",
         "references": references,
+        "quality_metrics": {"search": q_search},
         "messages": [final_response],
     }

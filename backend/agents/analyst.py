@@ -226,8 +226,13 @@ async def analyst_agent(state: dict, config=None) -> dict[str, Any]:
             "messages": [HumanMessage(content=f"分析失败: {e}")],
         }
 
-    # ── 解析 JSON 输出 ─────────────────────────────────────────
+    # ── 解析 JSON 输出 + ANALYSIS Skill 结构校验 ────────────────
+    from backend.skills import validate_analysis_payload
+
     analysis_data = _parse_analysis_json(response_text)
+    a_issues = validate_analysis_payload(analysis_data)
+    if a_issues:
+        logger.warning(f"分析结构校验: {a_issues[:8]}")
 
     logger.info(f"分析师完成分析，共生成 {len(charts)} 张图表")
 
@@ -236,6 +241,13 @@ async def analyst_agent(state: dict, config=None) -> dict[str, Any]:
         "current_phase": "writing",
         "messages": [response],
         "charts": charts,
+        "quality_metrics": {
+            "analysis": {
+                "issues": a_issues,
+                "charts": len(charts),
+                "ok": not a_issues,
+            }
+        },
     }
 
 
