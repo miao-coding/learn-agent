@@ -1,6 +1,6 @@
-# Multi-Agent 智能行业研究系统 — 技术学习指南
+# Multi-Agent 学术文献综述系统 — 技术学习指南
 
-> 本指南面向有一定 Python 基础但不了解项目中各项技术的开发者，帮助你从零理解整个系统的实现原理。
+> 本指南面向有一定 Python 基础的开发者。系统已从「行业研究」演进为**学术文献综述**流水线；下文按当前实现说明。后半部分旧章节若出现「行业/市场规模」等表述，可与本文开头对照，以当前代码为准。
 
 ---
 
@@ -8,68 +8,69 @@
 
 ### 项目定位
 
-这是一个 **Multi-Agent（多智能体）智能行业研究系统**。用户只需输入一个行业关键词（如"2026年储能市场"），系统就会自动：
+用户输入**研究方向**（可选上传 PDF/TXT/MD），系统自动：
 
-1. **联网搜索**：通过 Tavily API 搜索网络信息，通过 ArXiv 搜索学术论文
-2. **深度分析**：LLM 对搜索结果进行结构化分析，提取市场规模、竞争格局等关键数据
-3. **可视化**：自动生成趋势图、饼图、对比图等数据可视化图表
-4. **撰写报告**：生成学术论文风格的 Markdown 研究报告
-5. **人工审核**：支持用户审核报告并提出修改意见，系统自动返工修改
-6. **引用管理**：自动维护文献引用列表，确保数据可溯源
+1. **学术检索**：并行查 Crossref / OpenAlex / EuropePMC / CORE，ArXiv 限量补充；Tavily 可选
+2. **真实引用**：只收录检索到的文献；编造编号从正文删除；参考文献 1..N 重写
+3. **结构化分析**：方法分类、性能对比、发展脉络、研究空白 + matplotlib 图表
+4. **撰稿**：Markdown 综述；Skill 校验章节/引用；质量分门禁
+5. **人工审核**：通过 / 返工；失败任务进入 `failed` 而非假审核
+6. **可选上传**：用户材料作上下文，不进入可引用文献列表
 
-### 项目目录结构
+### 项目目录结构（当前）
 
-```
-d:\learn_agent\
-├── backend/                    # 后端服务
-│   ├── agents/                 # 多智能体定义
-│   │   ├── searcher.py        #   搜索员 — 联网搜索收集信息
-│   │   ├── analyst.py         #   分析师 — 深度分析提取数据
-│   │   ├── writer.py          #   撰稿人 — 撰写研究报告
-│   │   └── supervisor.py      #   主管 — 路由决策
-│   ├── api/                    # API 层
-│   │   ├── routes.py          #   路由定义（REST + SSE）
-│   │   └── schemas.py         #   Pydantic 请求/响应模型
-│   ├── graph/                  # LangGraph 图引擎
-│   │   ├── state.py           #   全局状态定义（TypedDict）
-│   │   ├── builder.py         #   图拓扑构建
-│   │   └── checkpointer.py    #   状态持久化配置
-│   ├── tools/                  # Agent 工具集
-│   │   ├── search.py          #   Tavily 搜索工具
-│   │   ├── arxiv_tool.py      #   ArXiv 论文检索工具
-│   │   ├── visualization.py   #   matplotlib 可视化工具
-│   │   └── rag.py             #   RAG 检索/存储工具
+```text
+learn_agent/
+├── backend/
+│   ├── agents/                 # searcher / analyst / writer / supervisor
+│   ├── api/                    # routes.py + schemas.py
+│   ├── graph/                  # state / builder / checkpointer
+│   ├── skills/                 # 策略层（多文件）
+│   │   ├── base.py             #   SkillPolicy / SkillSpec
+│   │   ├── lit_search.py       #   检索工具预算
+│   │   ├── analysis.py         #   分析 JSON 校验
+│   │   ├── report.py           #   报告结构校验
+│   │   ├── templates.py        #   pick_report_template
+│   │   └── __init__.py         #   注册表与再导出
+│   ├── tools/
+│   │   ├── arxiv_tool.py       # ArXiv + 限流/缓存
+│   │   ├── lit_sources.py      # Crossref/OpenAlex/EuropePMC/CORE + 并行 fallback
+│   │   ├── web_search_free.py  # DDG/Wiki/SearXNG 等免 Key 源
+│   │   ├── search.py           # Tavily（可选）
+│   │   ├── visualization.py    # matplotlib 图表（按 thread 隔离）
+│   │   └── rag.py              # RAG
 │   ├── utils/
-│   │   └── document_store.py  # ChromaDB 向量存储
-│   ├── config.py              # 配置管理（Pydantic Settings）
-│   └── main.py                # FastAPI 应用入口
-├── frontend/
-│   └── app.py                 # Streamlit 前端界面
-├── tests/                     # 测试套件
-├── output/                    # 输出目录（图表、向量数据库）
-├── checkpoints.db             # SQLite 状态持久化数据库
-├── requirements.txt           # Python 依赖
-├── pytest.ini                 # 测试配置
-└── .env.example               # 环境变量模板
+│   │   ├── citations.py        # 真实引用解析/对账/重编号
+│   │   ├── quality.py          # 检索/报告质量分与门禁
+│   │   ├── upload_docs.py      # 上传文献抽取
+│   │   ├── progress.py         # SSE 进度总线
+│   │   ├── checkpoint_time.py  # UUIDv6 → 时间
+│   │   └── document_store.py   # ChromaDB
+│   ├── config.py
+│   └── main.py
+├── frontend/app.py             # Streamlit（内嵌 MD、质量卡、进行中任务）
+├── requirements.txt
+├── .env.example
+└── pytest.ini
 ```
+
+`tests/`、`deploy/`、`docs/`、`output/` 仅存在于本地工作区，不进开源仓库。
 
 ### 技术栈一览
 
-| 技术 | 版本要求 | 用途 | 在项目中的角色 |
-|------|---------|------|---------------|
-| **LangGraph** | >=1.1 | 多智能体编排 | 核心引擎，编排 Agent 协作流程 |
-| **LangChain** | >=0.3 | LLM 调用框架 | 封装 OpenAI API、工具绑定 |
-| **langchain-openai** | >=0.3 | OpenAI 集成 | ChatOpenAI 模型 |
-| **FastAPI** | >=0.135 | Web 框架 | 后端 HTTP API + SSE |
-| **Streamlit** | >=1.30 | 前端框架 | 交互式 Web 界面 |
-| **Tavily** | latest | 搜索 API | 联网搜索和内容提取 |
-| **arxiv** | latest | 学术检索 | 论文搜索和下载 |
-| **pymupdf** | latest | PDF 解析 | 从论文 PDF 提取文本 |
-| **ChromaDB** | latest | 向量数据库 | RAG 文档存储和检索 |
-| **matplotlib** | latest | 数据可视化 | 生成静态 PNG 图表 |
-| **Pydantic** | v2 | 数据校验 | 配置管理 + API 模型 |
-| **SQLite** | 内置 | 持久化 | LangGraph 状态存储 |
-| **pytest** | latest | 测试框架 | 单元测试 + 集成测试 |
+| 技术 | 用途 |
+|------|------|
+| LangGraph + LangChain | 多智能体编排与工具绑定 |
+| Crossref / OpenAlex / EuropePMC / CORE | 学术主检索（免 Key） |
+| ArXiv | 预印本（节流 + 缓存 + 预算） |
+| Tavily / DuckDuckGo / SearXNG | 网络补充（可选） |
+| FastAPI + SSE | API 与实时进度 |
+| Streamlit | 前端 |
+| matplotlib | Agent 生成图表 |
+| ChromaDB | RAG |
+| AsyncSqliteSaver | 任务状态持久化 |
+| PyMuPDF | 上传 PDF 文本抽取 |
+| Pydantic v2 | 配置与 API 模型 |
 
 ### 架构图
 

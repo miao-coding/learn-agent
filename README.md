@@ -132,8 +132,6 @@ learn_agent/
 └── pytest.ini
 ```
 
-（`tests/`、`deploy/`、`docs/`、`output/` 仅保留在本地工作区，不进入开源仓库。）
-
 ## License
 
 MIT
