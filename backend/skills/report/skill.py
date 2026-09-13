@@ -1,6 +1,4 @@
-"""撰稿 Skill：章节结构与引用完整性校验"""
-from __future__ import annotations
-
+"""report Skill 的代码契约（结构校验）"""
 import re
 
 from backend.skills.base import SkillPolicy, SkillSpec
@@ -23,7 +21,6 @@ def validate_report_structure(
     required_sections: tuple[str, ...] = REPORT_REQUIRED_SECTIONS,
     min_citations: int = 3,
 ) -> list[str]:
-    """校验报告结构（不检查语言润色，只查硬结构）"""
     issues: list[str] = []
     text = report or ""
     if len(text.strip()) < min_chars:

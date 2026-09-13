@@ -1,6 +1,4 @@
-"""分析 Skill：必填 JSON 字段与校验"""
-from __future__ import annotations
-
+"""analysis Skill 的代码契约（字段校验）"""
 from typing import Any
 
 from backend.skills.base import SkillPolicy, SkillSpec
@@ -18,7 +16,6 @@ ANALYSIS_REQUIRED_FIELDS = (
 
 
 def validate_analysis_payload(data: dict[str, Any] | None) -> list[str]:
-    """校验分析师 JSON 是否具备综述所需结构（缺失项列表）"""
     issues: list[str] = []
     if not data or not isinstance(data, dict):
         return ["analysis_data 为空或非字典"]

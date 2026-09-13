@@ -125,10 +125,12 @@ async def writer_agent(state: dict) -> dict[str, Any]:
     tool_map = {"rag_search": rag_search}
 
     # ── 构建消息 ───────────────────────────────────────────────
-    from backend.skills import pick_report_template
+    from backend.skills import load_skill_body, pick_report_template
 
     template_id, template_focus = pick_report_template(topic)
-    messages: list = [SystemMessage(content=WRITER_SYSTEM_PROMPT)]
+    skill_body = load_skill_body("report")
+    skill_block = f"\n\n【Report Skill】\n{skill_body}\n" if skill_body else ""
+    messages: list = [SystemMessage(content=WRITER_SYSTEM_PROMPT + skill_block)]
 
     if review_feedback:
         # 有修改意见 → 基于已有报告进行修改

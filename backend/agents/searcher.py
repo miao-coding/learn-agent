@@ -136,6 +136,8 @@ async def searcher_agent(state: dict, config: RunnableConfig) -> dict[str, Any]:
     tool_map = {tool.name: tool for tool in tools}
 
     # ── 构建初始消息 ───────────────────────────────────────────
+    from backend.skills import load_skill_body
+
     upload_note = ""
     if uploaded_docs:
         names = ", ".join(d.get("filename") or "doc" for d in uploaded_docs)
@@ -144,8 +146,10 @@ async def searcher_agent(state: dict, config: RunnableConfig) -> dict[str, Any]:
             "这些内容已作为种子结果注入；请结合其主题与文中参考文献线索补充检索，"
             "不要忽略上传材料，也不要编造上传材料中不存在的引用。"
         )
+    lit_skill = load_skill_body("lit_search")
+    skill_block = f"\n\n【Lit Search Skill】\n{lit_skill}\n" if lit_skill else ""
     messages: list = [
-        SystemMessage(content=SEARCHER_SYSTEM_PROMPT),
+        SystemMessage(content=SEARCHER_SYSTEM_PROMPT + skill_block),
         HumanMessage(content=f"请围绕以下研究方向进行文献检索：{topic}{upload_note}"),
     ]
 

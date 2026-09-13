@@ -1,4 +1,4 @@
-"""Skill 基础类型：策略与规格（代码契约，不靠 LLM 自觉）"""
+"""Skill 基础类型：策略与规格（代码契约）"""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -7,8 +7,6 @@ from typing import Callable
 
 @dataclass(frozen=True)
 class SkillPolicy:
-    """执行策略"""
-
     tool_priority: tuple[str, ...] = ()
     tool_budgets: dict[str, int] = field(default_factory=dict)
     min_real_references: int = 6

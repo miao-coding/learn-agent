@@ -144,9 +144,14 @@ async def analyst_agent(state: dict, config=None) -> dict[str, Any]:
     ]
     llm_with_tools = llm.bind_tools(visualization_tools)
 
+    from backend.skills import load_skill_body
+
+    analysis_skill = load_skill_body("analysis")
+    skill_block = f"\n\n【Analysis Skill】\n{analysis_skill}\n" if analysis_skill else ""
+
     # ── 构建消息并调用 LLM ─────────────────────────────────────
     messages = [
-        SystemMessage(content=ANALYST_SYSTEM_PROMPT),
+        SystemMessage(content=ANALYST_SYSTEM_PROMPT + skill_block),
         HumanMessage(
             content=(
                 f"研究主题：{topic}\n\n"

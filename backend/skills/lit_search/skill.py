@@ -1,4 +1,4 @@
-"""文献检索 Skill：工具优先级与每任务预算"""
+"""lit_search Skill 的代码契约（预算与规格）"""
 from backend.skills.base import SkillPolicy, SkillSpec
 
 LIT_SEARCH = SkillSpec(
