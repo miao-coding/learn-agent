@@ -796,7 +796,6 @@ def process_stream(thread_id: str):
         st.session_state.task_started_at = time.time()
     with st.empty().container():
         _render_js_stopwatch(st.session_state.task_started_at, dom_id="sw-stream")
-    st.caption("连接正常，系统处理中")
 
     phases_placeholder = st.empty()
     log_placeholder = st.empty()
@@ -819,10 +818,15 @@ def process_stream(thread_id: str):
             # 不在这里显示秒表时间，避免与 JS 秒表抢刷新
             if writing_chars is not None:
                 st.caption(f"正在撰写综述… 已生成 {writing_chars} 字")
+            else:
+                st.caption("连接正常，系统处理中")
+
+    # 先画一次阶段/日志：从历史切到运行中任务时，若 SSE 暂无新事件也不会空白
+    _paint(force=True)
 
     for event_type, data in consume_sse_sync(thread_id):
         if event_type == "heartbeat":
-            # 仅保活；时间由 JS 秒表每秒自增，不重绘
+            # 仅保活；时间由 JS 秒表每秒自增，阶段/日志在有真实事件时再刷
             continue
 
         if event_type == "phase":
