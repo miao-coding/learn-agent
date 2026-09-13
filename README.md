@@ -127,10 +127,12 @@ learn_agent/
 │   ├── tools/      arxiv / lit_sources / visualization / rag / search
 │   └── utils/      citations / quality / upload_docs / progress
 ├── frontend/app.py
-├── deploy/         install.sh / remote_deploy.py / searxng/
-├── tests/
-└── docs/compose/spec/
+├── requirements.txt
+├── .env.example
+└── pytest.ini
 ```
+
+（`tests/`、`deploy/`、`docs/`、`output/` 仅保留在本地工作区，不进入开源仓库。）
 
 ## License
 

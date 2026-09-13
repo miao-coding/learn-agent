@@ -34,12 +34,8 @@ Thumbs.db
 # 日志
 *.log
 
-# ChromaDB 向量数据库
-output/chroma_db/
-
-# 用户上传文献与生成图表（运行时数据）
-output/uploads/
-output/charts/
+# 测试缓存
+.pytest_cache/
 
 # 子项目（另行管理）
 file_management/
@@ -49,10 +45,9 @@ deploy_bundle.tar.gz
 *.zip
 *.tar.gz
 
-# 测试缓存
-.pytest_cache/
-
-# deploy 目录仅保留正式工具；本地临时调试脚本可能含凭据，一律不入库
-deploy/*.py
-!deploy/remote_deploy.py
-!deploy/remote_exec.py
+# ── 仅本地保留，不进开源仓库 ──────────────────────────────
+# 测试 / 设计文档 / 部署脚本 / 运行时输出（上传文献、图表、向量库）
+tests/
+docs/
+deploy/
+output/
