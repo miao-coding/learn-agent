@@ -784,24 +784,49 @@ def process_stream(thread_id: str):
 
 
 def _svg_status_icon(kind: str, *, size: int = 18) -> str:
-    """纯 CSS/SVG 状态图标（无 emoji）：done / run / wait / fail / review / search / write / analyze"""
+    """SVG 状态图标（SMIL 内联动画，不依赖外部 CSS）
+
+    done/fail：弹入缩放；run/search/analyze/write：进度环旋转；
+    review：呼吸缩放；wait：静态空心。
+    """
     s = size
     common = (
         f'width="{s}" height="{s}" viewBox="0 0 24 24" fill="none" '
         f'style="vertical-align:-3px;flex-shrink:0" aria-hidden="true"'
     )
+    # 绕圆心旋转（SMIL，Streamlit HTML 更可靠）
+    spin = (
+        '<animateTransform attributeName="transform" type="rotate" '
+        'from="0 12 12" to="360 12 12" dur="0.9s" repeatCount="indefinite"/>'
+    )
+    # 弹入
+    pop = (
+        '<animateTransform attributeName="transform" type="scale" '
+        'values="0.7;1.05;1" keyTimes="0;0.6;1" dur="0.45s" fill="freeze" '
+        'additive="sum"/>'
+    )
+    # 呼吸
+    pulse = (
+        '<animate attributeName="opacity" values="0.55;1;0.55" dur="1.4s" '
+        'repeatCount="indefinite"/>'
+    )
+
     if kind == "done":
         return (
             f"<svg {common}>"
-            f'<circle cx="12" cy="12" r="10" fill="#22c55e"/>'
+            f'<circle cx="12" cy="12" r="10" fill="#22c55e">'
+            f'<animate attributeName="r" values="8;10.5;10" dur="0.4s" fill="freeze"/>'
+            f"</circle>"
             f'<path d="M7.5 12.5l3 3 6-7" stroke="#fff" stroke-width="2.2" '
-            f'stroke-linecap="round" stroke-linejoin="round"/>'
+            f'stroke-linecap="round" stroke-linejoin="round">'
+            f'<animate attributeName="stroke-dasharray" values="0 20;20 0" dur="0.45s" fill="freeze"/>'
+            f"</path>"
             f"</svg>"
         )
     if kind == "fail":
         return (
             f"<svg {common}>"
-            f'<circle cx="12" cy="12" r="10" fill="#ef4444"/>'
+            f'<circle cx="12" cy="12" r="10" fill="#ef4444">{pulse}</circle>'
             f'<path d="M8 8l8 8M16 8l-8 8" stroke="#fff" stroke-width="2.2" stroke-linecap="round"/>'
             f"</svg>"
         )
@@ -812,28 +837,38 @@ def _svg_status_icon(kind: str, *, size: int = 18) -> str:
             f"</svg>"
         )
     if kind in ("run", "search", "analyze", "write"):
-        # 旋转进度环 + 内点
         inner = {
-            "search": '<circle cx="12" cy="12" r="3" fill="#3b82f6"/>',
-            "analyze": '<path d="M8 15V10M12 15V7M16 15v-3" stroke="#3b82f6" stroke-width="2" stroke-linecap="round"/>',
-            "write": '<path d="M8 16l2.5-.5L18 8l-2-2-7.5 7.5L8 16z" stroke="#3b82f6" stroke-width="1.6" stroke-linejoin="round"/>',
+            "search": (
+                '<circle cx="10.5" cy="10.5" r="3.2" stroke="#3b82f6" stroke-width="1.8"/>'
+                '<path d="M13 13l4 4" stroke="#3b82f6" stroke-width="1.8" stroke-linecap="round"/>'
+            ),
+            "analyze": (
+                '<path d="M8 15V10M12 15V7M16 15v-3" stroke="#3b82f6" stroke-width="2" stroke-linecap="round">'
+                '<animate attributeName="opacity" values="0.4;1;0.4" dur="1s" repeatCount="indefinite"/>'
+                "</path>"
+            ),
+            "write": (
+                '<path d="M8 16l2.5-.5L18 8l-2-2-7.5 7.5L8 16z" stroke="#3b82f6" '
+                'stroke-width="1.6" stroke-linejoin="round"/>'
+            ),
             "run": '<circle cx="12" cy="12" r="3.5" fill="#3b82f6"/>',
         }.get(kind, '<circle cx="12" cy="12" r="3" fill="#3b82f6"/>')
         return (
             f"<svg {common}>"
-            f'<circle class="st-spin" cx="12" cy="12" r="9" stroke="#3b82f6" stroke-width="2.4" '
-            f'stroke-linecap="round" stroke-dasharray="40 20" opacity="0.9"/>'
+            f'<g>{spin}'
+            f'<circle cx="12" cy="12" r="9" stroke="#3b82f6" stroke-width="2.4" '
+            f'stroke-linecap="round" stroke-dasharray="36 24" opacity="0.95"/>'
+            f"</g>"
             f"{inner}"
             f"</svg>"
         )
     if kind == "review":
         return (
             f"<svg {common}>"
-            f'<circle cx="12" cy="12" r="9" stroke="#f59e0b" stroke-width="2"/>'
-            f'<circle cx="12" cy="12" r="3.2" fill="#f59e0b"/>'
+            f'<circle cx="12" cy="12" r="9" stroke="#f59e0b" stroke-width="2">{pulse}</circle>'
+            f'<circle cx="12" cy="12" r="3.2" fill="#f59e0b">{pulse}</circle>'
             f"</svg>"
         )
-    # 默认空心
     return (
         f"<svg {common}>"
         f'<circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="2" opacity="0.45"/>'
@@ -842,15 +877,10 @@ def _svg_status_icon(kind: str, *, size: int = 18) -> str:
 
 
 def _status_icon_css() -> str:
+    # 仅布局；动画已内置到 SVG SMIL
     return """
 <style>
-.st-spin { transform-origin: 12px 12px; animation: st-rot 1.1s linear infinite; }
-@keyframes st-rot { to { transform: rotate(360deg); } }
 .st-row { display:flex; align-items:center; gap:8px; }
-.st-badge {
-  display:inline-flex; align-items:center; justify-content:center;
-  width:22px; height:22px; border-radius:50%;
-}
 </style>
 """
 
@@ -1200,9 +1230,10 @@ def render_sidebar():
                     )
                 with col_del:
                     if st.button(
-                        "删",
+                        "删除",
                         key=f"hist-del-{tid}",
                         help=f"删除「{h_topic}」",
+                        icon=":material/delete:",
                     ):
                         if delete_history(tid):
                             # 若删除的是当前查看的任务，一并清空界面
@@ -1331,7 +1362,11 @@ def render_report_section():
     if tid_now and st.session_state.task_status in ("completed", "reviewing"):
         col_title, col_del = st.columns([6, 1])
         with col_del:
-            if st.button("删除报告", key="del-current-report"):
+            if st.button(
+                "删除报告",
+                key="del-current-report",
+                icon=":material/delete_sweep:",
+            ):
                 if delete_history(tid_now):
                     st.session_state.thread_id = None
                     st.session_state.report = ""

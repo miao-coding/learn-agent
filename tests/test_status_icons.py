@@ -6,7 +6,17 @@ def test_svg_icons_no_emoji():
     for kind in ("done", "fail", "wait", "run", "search", "analyze", "write", "review"):
         svg = _svg_status_icon(kind)
         assert "<svg" in svg
-        assert "st-spin" in svg or kind in ("done", "fail", "wait", "review")
+
+
+def test_running_icons_have_smil_animation():
+    for kind in ("run", "search", "analyze", "write"):
+        svg = _svg_status_icon(kind)
+        assert "animateTransform" in svg
+        assert "repeatCount" in svg
+
+
+def test_review_icon_pulses():
+    assert "animate" in _svg_status_icon("review")
 
 
 def test_toc_link_uses_fg_not_accent():
