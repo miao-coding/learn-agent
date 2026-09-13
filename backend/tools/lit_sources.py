@@ -60,7 +60,7 @@ def _crossref_search_impl(query: str, max_results: int = 8) -> str:
                 "select": "title,DOI,published-print,published-online,URL,author,abstract,is-referenced-by-count",
             },
             headers=_UA,
-            timeout=15,
+            timeout=10,
         )
         resp.raise_for_status()
         items = (resp.json() or {}).get("message", {}).get("items") or []
@@ -109,7 +109,7 @@ def _openalex_search_impl(query: str, max_results: int = 8, from_year: int = 0) 
                 "sort": "cited_by_count:desc",
             },
             headers=_UA,
-            timeout=18,
+            timeout=12,
         )
         resp.raise_for_status()
         results = (resp.json() or {}).get("results") or []
@@ -118,7 +118,7 @@ def _openalex_search_impl(query: str, max_results: int = 8, from_year: int = 0) 
                 "https://api.openalex.org/works",
                 params={"search": q, "per-page": n, "filter": filt},
                 headers=_UA,
-                timeout=18,
+                timeout=12,
             )
             resp.raise_for_status()
             results = (resp.json() or {}).get("results") or []
@@ -279,9 +279,9 @@ def core_search(query: str, max_results: int = 6) -> str:
 
 @tool
 def academic_fallback_search(query: str, max_results: int = 8) -> str:
-    """按可靠性依次尝试 Crossref → OpenAlex → EuropePMC → CORE（无需 Key）。
+    """并行查询 Crossref + OpenAlex，失败再补 EuropePMC/CORE（无需 Key）。
 
-    任一源成功即返回，避免单一源失败导致无文献。适合作为检索主工具。
+    主源并发，任一先成功即可用；显著快于串行 fallback。
 
     Args:
         query: 研究主题
@@ -291,14 +291,40 @@ def academic_fallback_search(query: str, max_results: int = 8) -> str:
     if not q:
         return "错误：查询为空"
     n = max(1, min(int(max_results or 8), 12))
-    attempts = (
-        ("Crossref", _crossref_search_impl),
-        ("OpenAlex", _openalex_search_impl),
+
+    # 第一波：两个最稳源并发
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    logs: list[str] = []
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futs = {
+            pool.submit(_crossref_search_impl, q, n): "Crossref",
+            pool.submit(_openalex_search_impl, q, n): "OpenAlex",
+        }
+        first_ok: str | None = None
+        for fut in as_completed(futs):
+            name = futs[fut]
+            try:
+                out = str(fut.result() or "")
+            except Exception as e:
+                logs.append(f"{name}: {e}")
+                continue
+            if out and not out.startswith(("未找到", f"{name} 搜索失败", "错误")):
+                # 取先完成且成功的
+                if first_ok is None:
+                    first_ok = out + f"\n\n（来源: {name}，并行检索）"
+                else:
+                    logs.append(f"{name}: 已有结果，跳过")
+            else:
+                logs.append(f"{name}: {out[:80]}")
+        if first_ok:
+            return first_ok
+
+    # 第二波：串行兜底
+    for name, fn in (
         ("EuropePMC", _europepmc_search_impl),
         ("CORE", _core_search_impl),
-    )
-    logs = []
-    for name, fn in attempts:
+    ):
         try:
             out = fn(q, n)
         except Exception as e:
@@ -310,3 +336,37 @@ def academic_fallback_search(query: str, max_results: int = 8) -> str:
             return text + f"\n\n（来源: {name}）"
         logs.append(f"{name}: {text[:80]}")
     return "未找到相关学术论文；各源情况：" + "；".join(logs[:4])
+
+
+def academic_multi_query(queries: list[str], max_results: int = 6) -> str:
+    """对多个 query 并行检索并合并去重（供检索员程序化预搜，不靠 LLM 多轮决策）
+
+    Args:
+        queries: 2-4 条不同角度的检索词
+        max_results: 每个源大致条数
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    qs = [_clean(q) for q in (queries or []) if _clean(q)]
+    if not qs:
+        return "错误：查询为空"
+
+    def _one(qq: str) -> tuple[str, str]:
+        return qq, _crossref_search_impl(qq, max_results)
+
+    # Crossref 对所有 query 并行；再对第一个 query 并行 OpenAlex
+    parts: list[str] = []
+    with ThreadPoolExecutor(max_workers=min(4, len(qs) + 1)) as pool:
+        futs = [pool.submit(_one, q) for q in qs]
+        futs.append(pool.submit(lambda: ("openalex:" + qs[0], _openalex_search_impl(qs[0], max_results))))
+        for fut in as_completed(futs):
+            try:
+                q, text = fut.result()
+            except Exception as e:
+                parts.append(f"[query失败] {e}")
+                continue
+            if text and not str(text).startswith(("未找到", "Crossref 搜索失败", "OpenAlex 搜索失败", "错误")):
+                parts.append(f"### 检索词: {q}\n{text}")
+    if not parts:
+        return "未找到相关学术论文"
+    return "\n\n".join(parts)

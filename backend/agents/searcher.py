@@ -163,7 +163,44 @@ async def searcher_agent(state: dict, config: RunnableConfig) -> dict[str, Any]:
     # 用上传文献里的参考标题补搜一轮（真实二次检索，不是编造）
     pending_upload_ref_query = upload_ref_titles[0][:180] if upload_ref_titles else ""
 
-    for i in range(6):
+    # ── 程序化预搜（不经 LLM 多轮决策，先把文献池填起来）──────
+    from backend.tools.lit_sources import academic_multi_query
+    from backend.utils.citations import build_references_from_search_results
+
+    pre_queries = [
+        f"{topic} survey review",
+        f"{topic} deep learning",
+        topic,
+    ]
+    # 英文更好命中 Crossref；保留中文主题原样
+    if topic and not topic.isascii():
+        pre_queries.append(topic)
+    pre_queries = pre_queries[:3]
+    await report_progress(config, f"⚡ 并行预检索 {len(pre_queries)} 条学术查询…")
+    try:
+        pre_text = await asyncio.to_thread(academic_multi_query, pre_queries, 6)
+        if pre_text and not pre_text.startswith("未找到"):
+            all_search_results.append(
+                {"query": " / ".join(pre_queries), "result": pre_text, "source": "scholar"}
+            )
+            logger.info("程序化预检索完成，已写入 search_results")
+    except Exception as e:
+        logger.warning(f"程序化预检索失败: {e}")
+
+    # 若预搜已足够，LLM 只需 2 轮做补充；否则 4 轮
+    pre_refs = build_references_from_search_results(
+        [
+            {"source": s.get("source"), "query": s.get("query"), "content": s.get("result")}
+            for s in all_search_results
+        ]
+    )
+    max_rounds = 2 if len(pre_refs) >= skill.policy.min_real_references else 4
+    await report_progress(
+        config,
+        f"预检索已有真实文献约 {len(pre_refs)} 条，LLM 补充轮次上限 {max_rounds}",
+    )
+
+    for i in range(max_rounds):
         logger.debug(f"搜索员第 {i + 1} 轮工具调用")
         await report_progress(config, f"🔎 检索员第 {i + 1} 轮：正在决策检索策略...")
         # 无工具调用前：若有上传参考标题，强制用 academic_fallback 补搜一次
@@ -414,8 +451,12 @@ async def searcher_agent(state: dict, config: RunnableConfig) -> dict[str, Any]:
             "messages": [HumanMessage(content=err)],
         }
 
-    # ── 让 LLM 做最终总结 ──────────────────────────────────────
-    messages.append(HumanMessage(content="请总结你搜索到的所有信息，按类别整理输出。请明确区分网络来源（web）和学术来源（arxiv/arxiv_pdf），分别列出。"))
+    # ── 让 LLM 做最终总结（文献已够时用简短总结，降低耗时）──────
+    if len(references) >= 8:
+        summary_hint = "请用 3-5 句话总结已检索到的学术来源要点（不必逐条罗列）。"
+    else:
+        summary_hint = "请总结你搜索到的所有信息，按类别整理输出。请明确区分网络来源（web）和学术来源（arxiv/arxiv_pdf），分别列出。"
+    messages.append(HumanMessage(content=summary_hint))
     try:
         final_response = await llm.ainvoke(messages)
     except Exception as e:
