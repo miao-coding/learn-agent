@@ -58,6 +58,22 @@ def quality_score_report(
         issues.append("与真实文献对应的正文引用少于 3 处")
     if cited - ref_ids:
         issues.append(f"正文仍含列表外编号: {sorted(cited - ref_ids)[:8]}")
+
+    # 轻量错配启发：标题中的长词若全文未出现，标记「可能张冠李戴」
+    mismatched = []
+    body_l = body.lower()
+    for r in refs:
+        rid = int(r.get("id", 0))
+        if rid not in cited:
+            continue
+        title = str(r.get("title") or "")
+        # 取英文长词或中文词
+        tokens = re.findall(r"[A-Za-z]{5,}|[一-鿿]{2,}", title)
+        tokens = [t.lower() for t in tokens if t.lower() not in {"remote", "sensing", "image", "images", "using", "based", "model", "models", "with", "for", "the", "and", "study", "analysis"}]
+        if tokens and not any(t in body_l for t in tokens[:6]):
+            mismatched.append(rid)
+    if mismatched:
+        issues.append(f"引用可能与标题不匹配（正文未出现标题关键词）: {mismatched[:8]}")
     return {
         "stage": "report",
         "score": score,

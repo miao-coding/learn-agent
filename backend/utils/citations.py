@@ -27,6 +27,23 @@ def _is_plausible_title(title: str, query: str = "") -> bool:
     return True
 
 
+def _clean_reference_title(title: str) -> str:
+    """清洗文献标题：去 HTML、Crossref review 前缀、过长摘要式文本"""
+    import re as _re
+
+    t = _re.sub(r"<[^>]+>", " ", str(title or ""))
+    t = _re.sub(r"\s+", " ", t).strip()
+    # Crossref 评审条目不是论文本身
+    if _re.match(r"(?i)^review\s+for\s+", t):
+        return ""
+    # 明显是摘要/句子而非标题
+    if len(t) > 180 and ("." in t[20:80] or t.count(",") > 6):
+        return ""
+    if t.lower().startswith(("abstract", "摘要")):
+        return ""
+    return t[:200]
+
+
 def extract_reference_meta(
     source: str, content: str, query: str = ""
 ) -> dict[str, str]:
@@ -94,8 +111,11 @@ def extract_reference_meta(
                 date = m.group(1)
 
     # 不再用 query 冒充标题；无标题则留空，由调用方决定是否丢弃
+    cleaned_title = _clean_reference_title(title) if title else ""
+    if cleaned_title and not _is_plausible_title(cleaned_title, query):
+        cleaned_title = ""
     return {
-        "title": title if _is_plausible_title(title, query) else "",
+        "title": cleaned_title,
         "url": url,
         "date": date,
         "source": source or "web",
@@ -133,6 +153,9 @@ def build_references_from_search_results(
     rid = 1
     for item in search_results or []:
         source = str(item.get("source") or "web")
+        # 上传文件只作分析上下文，不进入「可引用文献」列表
+        if source in ("uploaded", "uploaded_refs"):
+            continue
         query = str(item.get("query") or "")
         content = str(item.get("content") or item.get("result") or "")
         if not content.strip():
@@ -147,7 +170,11 @@ def build_references_from_search_results(
             if not title and not url:
                 continue
             if not title and url:
-                # 用 URL 末段作弱标题，避免「未知」
+                title = url.rstrip("/").split("/")[-1][:80] or "文献"
+            title = _clean_reference_title(title)
+            if not title and not url:
+                continue
+            if not title and url:
                 title = url.rstrip("/").split("/")[-1][:80] or "文献"
             key = (url or title).lower()
             if key in seen_keys:
@@ -230,7 +257,7 @@ def remap_body_citations(report: str, id_map: dict[int, int]) -> str:
 
 
 def filter_real_references(references: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """只保留可视为真实检索产物的条目"""
+    """只保留可视为真实检索产物的条目（排除上传材料）"""
     out = []
     for r in references or []:
         if not r or r.get("id") is None:
@@ -238,13 +265,16 @@ def filter_real_references(references: list[dict[str, Any]]) -> list[dict[str, A
         title = str(r.get("title") or "")
         url = str(r.get("url") or "")
         source = str(r.get("source") or "")
-        if source in ("unknown", ""):
+        if source in ("unknown", "", "uploaded", "uploaded_refs"):
             continue
         if "未命名" in title or "未知来源" in title:
             continue
+        title = _clean_reference_title(title)
         if not _is_plausible_title(title) and not url:
             continue
-        out.append(r)
+        item = dict(r)
+        item["title"] = title or item.get("title") or "文献"
+        out.append(item)
     return out
 
 
