@@ -12,6 +12,6 @@ def test_render_embedded_markdown_importable():
     from frontend import app as fe
 
     assert callable(fe.render_embedded_markdown)
-    src = fe._REPORT_CSS
-    assert "report-md" in src
-    assert "table" in src
+    css = fe._report_css()
+    assert "report-md" in css
+    assert "table" in css

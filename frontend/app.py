@@ -19,101 +19,184 @@ st.set_page_config(
 # ============ 常量 ============
 API_BASE_URL = "http://localhost:8000"
 
-# 内嵌 Markdown 报告样式（论文阅读感）
-_REPORT_CSS = """
+
+def _is_dark_theme() -> bool:
+    """跟随 Streamlit 主题（Settings → Appearance）"""
+    try:
+        base = st.get_option("theme.base")
+        if base:
+            return str(base).lower() == "dark"
+    except Exception:
+        pass
+    try:
+        bg = str(st.get_option("theme.backgroundColor") or "")
+        # 粗略判断：背景偏深则按暗色处理
+        if bg.startswith("#"):
+            h = bg.lstrip("#")[:6]
+            if len(h) == 6:
+                r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+                return (r * 299 + g * 587 + b * 114) / 1000 < 100
+    except Exception:
+        pass
+    return False
+
+
+def _theme_tokens() -> dict[str, str]:
+    """返回当前主题下的 UI 颜色 token，避免深色模式字色/底色撞车"""
+    if _is_dark_theme():
+        return {
+            "bg": "#0e1117",
+            "fg": "#e8eaed",
+            "muted": "#9aa0a6",
+            "border": "#3c4043",
+            "accent": "#8ab4f8",
+            "h3": "#c4c7c5",
+            "th_bg": "#1f2428",
+            "tr_bg": "#161a1d",
+            "code_bg": "#1f2428",
+            "code_fg": "#e8eaed",
+            "pre_bg": "#000000",
+            "pre_fg": "#d7dadd",
+            "quote_bg": "#1a1f24",
+            "quote_fg": "#bdc1c6",
+            "ok_bg": "#143d24",
+            "bad_bg": "#4a1c1c",
+            "info_bg": "#1a2744",
+            "card_fg": "#c4c7c5",
+            "header_sub": "#9aa0a6",
+        }
+    return {
+        "bg": "#ffffff",
+        "fg": "#1a1a1a",
+        "muted": "#5f6368",
+        "border": "#e2e8f0",
+        "accent": "#2b6cb0",
+        "h3": "#2d3748",
+        "th_bg": "#edf2f7",
+        "tr_bg": "#fafafa",
+        "code_bg": "#f1f5f9",
+        "code_fg": "#1a1a1a",
+        "pre_bg": "#0f172a",
+        "pre_fg": "#e2e8f0",
+        "quote_bg": "#f7fafc",
+        "quote_fg": "#4a5568",
+        "ok_bg": "#e6f4ea",
+        "bad_bg": "#fce8e6",
+        "info_bg": "#e8f0fe",
+        "card_fg": "#555555",
+        "header_sub": "#666666",
+    }
+
+
+def _report_css(t: dict[str, str] | None = None) -> str:
+    """内嵌 Markdown 报告样式（随主题切换，深色模式可读）"""
+    t = t or _theme_tokens()
+    return f"""
 <style>
-.report-md {
+html, body {{
+  background: {t['bg']};
+  color: {t['fg']};
+  margin: 0;
+  padding: 0;
+}}
+.report-md {{
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
                "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
   font-size: 15px;
   line-height: 1.75;
-  color: #1a1a1a;
+  color: {t['fg']};
+  background: {t['bg']};
   max-width: 920px;
   margin: 0 auto;
   padding: 8px 4px 32px;
-}
-.report-md h1 {
+}}
+.report-md h1 {{
   font-size: 1.65rem;
   font-weight: 700;
-  border-bottom: 2px solid #e8e8e8;
+  border-bottom: 2px solid {t['border']};
   padding-bottom: 0.4rem;
   margin: 1.2rem 0 1rem;
-}
-.report-md h2 {
+  color: {t['fg']};
+}}
+.report-md h2 {{
   font-size: 1.3rem;
   font-weight: 650;
   margin: 1.6rem 0 0.7rem;
   padding-left: 0.55rem;
-  border-left: 4px solid #2b6cb0;
-}
-.report-md h3 {
+  border-left: 4px solid {t['accent']};
+  color: {t['fg']};
+}}
+.report-md h3 {{
   font-size: 1.1rem;
   font-weight: 600;
   margin: 1.2rem 0 0.5rem;
-  color: #2d3748;
-}
-.report-md h4, .report-md h5 {
+  color: {t['h3']};
+}}
+.report-md h4, .report-md h5 {{
   font-size: 1rem;
   font-weight: 600;
   margin: 1rem 0 0.4rem;
-}
-.report-md p { margin: 0.55rem 0; }
-.report-md ul, .report-md ol { padding-left: 1.4rem; margin: 0.5rem 0; }
-.report-md li { margin: 0.25rem 0; }
-.report-md blockquote {
+  color: {t['fg']};
+}}
+.report-md p {{ margin: 0.55rem 0; color: {t['fg']}; }}
+.report-md ul, .report-md ol {{ padding-left: 1.4rem; margin: 0.5rem 0; }}
+.report-md li {{ margin: 0.25rem 0; color: {t['fg']}; }}
+.report-md blockquote {{
   margin: 0.8rem 0;
   padding: 0.6rem 1rem;
-  border-left: 4px solid #cbd5e0;
-  background: #f7fafc;
-  color: #4a5568;
+  border-left: 4px solid {t['border']};
+  background: {t['quote_bg']};
+  color: {t['quote_fg']};
   border-radius: 0 6px 6px 0;
-}
-.report-md table {
+}}
+.report-md table {{
   border-collapse: collapse;
   width: 100%;
   margin: 1rem 0;
   font-size: 0.92rem;
   display: block;
   overflow-x: auto;
-}
-.report-md th, .report-md td {
-  border: 1px solid #e2e8f0;
+  color: {t['fg']};
+}}
+.report-md th, .report-md td {{
+  border: 1px solid {t['border']};
   padding: 0.5rem 0.75rem;
   text-align: left;
   vertical-align: top;
-}
-.report-md th {
-  background: #edf2f7;
+  color: {t['fg']};
+}}
+.report-md th {{
+  background: {t['th_bg']};
   font-weight: 600;
   white-space: nowrap;
-}
-.report-md tr:nth-child(even) td { background: #fafafa; }
-.report-md code {
+}}
+.report-md tr:nth-child(even) td {{ background: {t['tr_bg']}; }}
+.report-md code {{
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 0.88em;
-  background: #f1f5f9;
+  background: {t['code_bg']};
+  color: {t['code_fg']};
   padding: 0.12em 0.35em;
   border-radius: 4px;
-}
-.report-md pre {
-  background: #0f172a;
-  color: #e2e8f0;
+}}
+.report-md pre {{
+  background: {t['pre_bg']};
+  color: {t['pre_fg']};
   padding: 0.9rem 1rem;
   border-radius: 8px;
   overflow-x: auto;
   margin: 0.8rem 0;
-}
-.report-md pre code { background: transparent; color: inherit; padding: 0; }
-.report-md a { color: #2b6cb0; text-decoration: none; }
-.report-md a:hover { text-decoration: underline; }
-.report-md hr {
+}}
+.report-md pre code {{ background: transparent; color: inherit; padding: 0; }}
+.report-md a {{ color: {t['accent']}; text-decoration: none; }}
+.report-md a:hover {{ text-decoration: underline; }}
+.report-md hr {{
   border: none;
-  border-top: 1px solid #e2e8f0;
+  border-top: 1px solid {t['border']};
   margin: 1.5rem 0;
-}
-.report-md img { max-width: 100%; border-radius: 6px; }
-/* 引用编号 [1] 轻微高亮 */
-.report-md em:empty { display: none; }
+}}
+.report-md img {{ max-width: 100%; border-radius: 6px; }}
+.report-md em:empty {{ display: none; }}
 </style>
 """
 
@@ -141,7 +224,7 @@ def render_embedded_markdown(md_text: str, *, min_height: int = 520, max_height:
 
     html_doc = f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-{_REPORT_CSS}
+{_report_css()}
 </head>
 <body>
 <article class="report-md">
@@ -588,16 +671,18 @@ def _render_progress_log(max_lines: int = 24):
     messages = st.session_state.progress_messages[-max_lines:]
     if not messages:
         return
+    t = _theme_tokens()
     # 单块 HTML 滚动容器，避免 Streamlit 逐条 markdown 撑开页面
     lines = "".join(
-        f"<div style='margin:0 0 4px 0;line-height:1.45'>→ {_html_escape(m)}</div>"
+        f"<div style='margin:0 0 4px 0;line-height:1.45;color:{t['fg']}'>→ {_html_escape(m)}</div>"
         for m in messages
     )
     st.markdown(
         f"""
-        <div style="max-height:220px;overflow-y:auto;border:1px solid rgba(128,128,128,.35);
-                    border-radius:8px;padding:10px 12px;font-size:0.88rem;background:rgba(128,128,128,.06)">
-          <div style="font-weight:600;margin-bottom:6px">📝 详细进度（最近 {len(messages)} 条）</div>
+        <div style="max-height:220px;overflow-y:auto;border:1px solid {t['border']};
+                    border-radius:8px;padding:10px 12px;font-size:0.88rem;
+                    background:{t['th_bg']};color:{t['fg']}">
+          <div style="font-weight:600;margin-bottom:6px;color:{t['fg']}">📝 详细进度（最近 {len(messages)} 条）</div>
           {lines}
         </div>
         """,
@@ -617,10 +702,11 @@ def _html_escape(text: str) -> str:
 # ============ UI 组件 ============
 def render_header():
     """渲染页面头部"""
-    st.markdown("""
+    t = _theme_tokens()
+    st.markdown(f"""
     <div style="text-align: center; padding: 1rem 0;">
-        <h1>📚 Multi-Agent 文献综述助手</h1>
-        <p style="color: #666; font-size: 1.1rem;">输入研究方向，自动检索文献并生成带引用的综述报告</p>
+        <h1 style="color:{t['fg']}">📚 Multi-Agent 文献综述助手</h1>
+        <p style="color: {t['header_sub']}; font-size: 1.1rem;">输入研究方向，自动检索文献并生成带引用的综述报告</p>
     </div>
     """, unsafe_allow_html=True)
     st.divider()
@@ -631,28 +717,32 @@ def _render_admin_settings(admin_status: dict) -> None:
     llm_ok = bool(admin_status.get("openai_key_set"))
     tavily_ok = bool(admin_status.get("tavily_key_set"))
     model_name = admin_status.get("model_name") or "-"
+    t = _theme_tokens()
+
+    def _card(bg: str, icon_line: str, label: str) -> str:
+        return (
+            f"<div style='text-align:center;padding:8px 4px;border-radius:8px;"
+            f"background:{bg};border:1px solid {t['border']}'>"
+            f"<div style='font-size:1.1rem;color:{t['fg']}'>{icon_line}</div>"
+            f"<div style='font-size:0.75rem;color:{t['card_fg']}'>{label}</div></div>"
+        )
 
     st.markdown("##### 当前状态")
     c1, c2, c3 = st.columns(3)
     c1.markdown(
-        f"<div style='text-align:center;padding:8px 4px;border-radius:8px;"
-        f"background:{'#e6f4ea' if llm_ok else '#fce8e6'}'>"
-        f"<div style='font-size:1.1rem'>{'✅' if llm_ok else '❌'}</div>"
-        f"<div style='font-size:0.75rem;color:#555'>LLM Key</div></div>",
+        _card(t["ok_bg"] if llm_ok else t["bad_bg"], "✅" if llm_ok else "❌", "LLM Key"),
         unsafe_allow_html=True,
     )
     c2.markdown(
-        f"<div style='text-align:center;padding:8px 4px;border-radius:8px;"
-        f"background:{'#e6f4ea' if tavily_ok else '#fce8e6'}'>"
-        f"<div style='font-size:1.1rem'>{'✅' if tavily_ok else '❌'}</div>"
-        f"<div style='font-size:0.75rem;color:#555'>Tavily</div></div>",
+        _card(t["ok_bg"] if tavily_ok else t["bad_bg"], "✅" if tavily_ok else "❌", "Tavily"),
         unsafe_allow_html=True,
     )
     c3.markdown(
-        f"<div style='text-align:center;padding:8px 4px;border-radius:8px;"
-        f"background:#e8f0fe'>"
-        f"<div style='font-size:0.85rem;font-weight:600'>{model_name[:18]}</div>"
-        f"<div style='font-size:0.75rem;color:#555'>默认模型</div></div>",
+        _card(
+            t["info_bg"],
+            f"<span style='font-size:0.85rem;font-weight:600;color:{t['fg']}'>{model_name[:18]}</span>",
+            "默认模型",
+        ),
         unsafe_allow_html=True,
     )
 
