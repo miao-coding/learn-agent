@@ -934,75 +934,74 @@ def render_header():
 
 
 def _render_admin_settings(admin_status: dict) -> None:
-    """系统设置：状态卡片 + 分组表单 + 操作按钮（侧边栏内布局）"""
+    """系统设置：适配侧边栏窄宽度的纵向状态 + 单列表单"""
     llm_ok = bool(admin_status.get("openai_key_set"))
     tavily_ok = bool(admin_status.get("tavily_key_set"))
-    model_name = admin_status.get("model_name") or "-"
+    model_name = (admin_status.get("model_name") or "-").strip()
+    base_url = (admin_status.get("openai_base_url") or "").strip()
     t = _theme_tokens()
 
-    def _card(bg: str, icon_line: str, label: str) -> str:
+    # 侧边栏约 280–320px：避免三列卡片挤压，改用单列状态条
+    def _row(ok: bool | None, label: str, value: str, *, warn: bool = False) -> str:
+        if ok is True:
+            icon = _svg_status_icon("done", size=16)
+            color = t["fg"]
+        elif ok is False:
+            icon = _svg_status_icon("fail", size=16)
+            color = t["fg"]
+        else:
+            icon = _svg_status_icon("wait", size=16)
+            color = t["card_fg"]
+        bg = t["th_bg"]
+        if ok is True:
+            bg = t["ok_bg"]
+        elif ok is False:
+            bg = t["bad_bg"]
         return (
-            f"<div style='text-align:center;padding:8px 4px;border-radius:8px;"
-            f"background:{bg};border:1px solid {t['border']}'>"
-            f"<div style='font-size:1.1rem;color:{t['fg']}'>{icon_line}</div>"
-            f"<div style='font-size:0.75rem;color:{t['card_fg']}'>{label}</div></div>"
+            f"<div style='display:flex;align-items:center;gap:8px;padding:6px 8px;"
+            f"margin:0 0 6px 0;border-radius:8px;border:1px solid {t['border']};"
+            f"background:{bg};min-height:36px;box-sizing:border-box'>"
+            f"{icon}"
+            f"<div style='min-width:0;flex:1'>"
+            f"<div style='font-size:0.8rem;color:{t['card_fg']};line-height:1.2'>{label}</div>"
+            f"<div style='font-size:0.82rem;color:{color};font-weight:600;"
+            f"white-space:nowrap;overflow:hidden;text-overflow:ellipsis' title=\"{_html_escape(value)}\">"
+            f"{_html_escape(value)}</div>"
+            f"</div></div>"
         )
 
     st.markdown("##### 当前状态")
-    c1, c2, c3 = st.columns(3)
-    c1.markdown(
-        _card(
-            t["ok_bg"] if llm_ok else t["bad_bg"],
-            _svg_status_icon("done" if llm_ok else "fail"),
-            "LLM Key",
-        ),
+    st.markdown(
+        _row(llm_ok, "LLM Key", "已配置" if llm_ok else "未配置")
+        + _row(tavily_ok, "Tavily", "已配置" if tavily_ok else "未配置或占位")
+        + _row(None, "默认模型", model_name[:28] if model_name else "-"),
         unsafe_allow_html=True,
     )
-    c2.markdown(
-        _card(
-            t["ok_bg"] if tavily_ok else t["bad_bg"],
-            _svg_status_icon("done" if tavily_ok else "fail"),
-            "Tavily",
-        ),
-        unsafe_allow_html=True,
-    )
-    c3.markdown(
-        _card(
-            t["info_bg"],
-            f"<span style='font-size:0.85rem;font-weight:600;color:{t['fg']}'>{model_name[:18]}</span>",
-            "默认模型",
-        ),
-        unsafe_allow_html=True,
-    )
-
-    if admin_status.get("openai_base_url"):
-        st.caption(f"接口地址：`{admin_status.get('openai_base_url')}`")
+    if base_url:
+        st.caption(f"接口：`{base_url[:42]}`" + ("…" if len(base_url) > 42 else ""))
 
     st.markdown("##### 修改配置")
-    st.caption("密钥与接口留空表示不修改；保存后即时生效并写入服务器 `.env`。")
+    st.caption("留空表示不修改；保存后即时生效。")
 
     with st.form("admin_config_form", clear_on_submit=False):
         admin_pwd = st.text_input(
             "管理员口令",
             type="password",
-            placeholder="服务器 ADMIN_PASSWORD",
-            help="防误改：所有操作均需校验口令",
+            placeholder="ADMIN_PASSWORD",
+            help="所有操作均需校验口令",
         )
 
         st.markdown("**模型接口**")
-        col_url, col_model = st.columns(2)
-        with col_url:
-            new_base_url = st.text_input(
-                "BASE_URL",
-                placeholder="https://open.bigmodel.cn/api/coding/paas/v4",
-                help="OpenAI 兼容接口地址",
-            )
-        with col_model:
-            new_model = st.text_input(
-                "默认模型",
-                placeholder=st.session_state.get("_ph_model") or "glm-5.3-flash",
-                help="接口内的模型名",
-            )
+        new_base_url = st.text_input(
+            "BASE_URL",
+            placeholder="https://open.bigmodel.cn/api/coding/paas/v4",
+            help="OpenAI 兼容接口地址",
+        )
+        new_model = st.text_input(
+            "默认模型",
+            placeholder="glm-5.3-flash",
+            help="接口内的模型名",
+        )
         new_openai_key = st.text_input(
             "API Key",
             type="password",
@@ -1014,17 +1013,17 @@ def _render_admin_settings(admin_status: dict) -> None:
             "Tavily Key",
             type="password",
             placeholder="tvly-...",
-            help="用于网络补充检索；无效时系统自动仅走 ArXiv",
+            help="无效时系统自动仅走学术源",
         )
 
         st.markdown("**操作**")
-        b1, b2, b3 = st.columns(3)
+        # 侧边栏按钮：两行布局，避免三列文字被截断
+        b1, b2 = st.columns(2)
         with b1:
             fetch_clicked = st.form_submit_button("获取模型", use_container_width=True)
         with b2:
-            test_clicked = st.form_submit_button(" 测试连接", use_container_width=True)
-        with b3:
-            save_clicked = st.form_submit_button(" 保存", use_container_width=True)
+            test_clicked = st.form_submit_button("测试连接", use_container_width=True)
+        save_clicked = st.form_submit_button("保存配置", use_container_width=True, type="primary")
 
     if fetch_clicked:
         if not admin_pwd:
