@@ -61,6 +61,128 @@ RAG 检索能力：你可以使用 rag_search 工具从向量数据库中检索�
 - 末尾「参考文献」只列出你实际用到的、且在提供列表中的编号
 """
 
+# ── 分节撰稿：多次短调用拼装，降低长请求 524 ─────────────────────
+_REPORT_SECTIONS: list[dict[str, Any]] = [
+    {
+        "key": "abstract",
+        "heading": "## 摘要",
+        "hint": "200-300字：范围、方法脉络、核心结论",
+        "max_chars": 500,
+    },
+    {
+        "key": "intro",
+        "heading": "## 1. 引言",
+        "hint": "背景与意义、综述范围、文献来源说明",
+        "max_chars": 700,
+    },
+    {
+        "key": "taxonomy",
+        "heading": "## 2. 研究现状与方法分类",
+        "hint": "按方法/技术路线分类，原理与代表工作；多用 [n] 引用",
+        "max_chars": 1400,
+    },
+    {
+        "key": "comparison",
+        "heading": "## 3. 方法对比与分析",
+        "hint": "Markdown 表格对比优缺点/复杂度/适用场景",
+        "max_chars": 1000,
+    },
+    {
+        "key": "challenges",
+        "heading": "## 4. 挑战与研究空白",
+        "hint": "局限与未解决问题",
+        "max_chars": 700,
+    },
+    {
+        "key": "conclusion",
+        "heading": "## 5. 总结与展望",
+        "hint": "趋势与未来方向",
+        "max_chars": 500,
+    },
+]
+
+
+async def _generate_one_section(
+    llm,
+    *,
+    topic: str,
+    section: dict,
+    template_id: str,
+    template_focus: str,
+    analysis_text: str,
+    references_text: str,
+    prior_outline: str,
+    review_feedback: str | None = None,
+) -> str:
+    """单次生成一个章节（短输出）"""
+    sys = SystemMessage(
+        content=(
+            "你是学术综述撰稿人。只输出本章节 Markdown 正文，"
+            "不要输出整篇报告，不要其它章节，不要过程说明。\n"
+            "引用只能使用提供的 [数字] 编号，禁止编造文献。"
+        )
+    )
+    fb = f"\n审核修改意见（本章针对性改进）：\n{review_feedback}\n" if review_feedback else ""
+    user = HumanMessage(
+        content=(
+            f"研究主题：{topic}\n"
+            f"模板：{template_id} — {template_focus}\n"
+            f"本章：{section['heading']}\n"
+            f"要点：{section['hint']}；长度建议 ≤{section['max_chars']} 字\n"
+            f"全文大纲（只作衔接）：{prior_outline}\n"
+            f"分析数据节选：\n{analysis_text[:3500]}\n\n"
+            f"可用引用：\n{references_text[:3000]}\n"
+            f"{fb}\n"
+            f"直接输出该章节 Markdown。"
+        )
+    )
+    resp = await llm.ainvoke([sys, user])
+    return _strip_llm_preamble(str(resp.content or "").strip())
+
+
+async def _write_report_sectioned(
+    llm,
+    *,
+    topic: str,
+    template_id: str,
+    template_focus: str,
+    analysis_text: str,
+    references_text: str,
+    review_feedback: str | None = None,
+) -> str:
+    """按章节串行生成并拼装完整报告"""
+    parts: list[str] = [f"# {topic}"]
+    outline = " / ".join(s["heading"].replace("#", "").strip() for s in _REPORT_SECTIONS)
+
+    for section in _REPORT_SECTIONS:
+        text = ""
+        for attempt in range(2):
+            try:
+                text = await _generate_one_section(
+                    llm,
+                    topic=topic,
+                    section=section,
+                    template_id=template_id,
+                    template_focus=template_focus,
+                    analysis_text=analysis_text,
+                    references_text=references_text,
+                    prior_outline=outline,
+                    review_feedback=review_feedback,
+                )
+                if text:
+                    break
+            except Exception as e:
+                logger.warning(f"章节 {section['key']} 第 {attempt + 1} 次失败: {e}")
+                await asyncio.sleep(2)
+        if not text:
+            text = f"{section['heading']}\n\n（本节生成失败，已跳过）"
+        if not text.lstrip().startswith("#"):
+            text = f"{section['heading']}\n\n{text}"
+        parts.append(text)
+        await asyncio.sleep(0.4)
+
+    return "\n\n".join(parts) + "\n"
+
 
 async def writer_agent(state: dict) -> dict[str, Any]:
     """撰稿人节点 - 基于分析数据撰写/修改报告
@@ -111,164 +233,46 @@ async def writer_agent(state: dict) -> dict[str, Any]:
     # ── 格式化引用列表 ─────────────────────────────────────────
     references_text = _format_references(references)
 
-    # ── 初始化 LLM 并绑定工具 ─────────────────────────────────
+    # ── 初始化 LLM ──────────────────────────────────────────────
     llm_cfg = settings.resolve_llm_config(state.get("model_name"))
-    # 长文生成易被网关 524 掐断：加大客户端超时并自动重试
     llm = ChatOpenAI(
         model=llm_cfg["model"],
         api_key=llm_cfg["api_key"],
         base_url=llm_cfg["base_url"],
-        temperature=0.3,  # 撰稿需要一定创造性
-        timeout=600,
-        max_retries=3,
+        temperature=0.3,
+        timeout=180,
+        max_retries=2,
     )
 
-    tools = [rag_search]
-    llm_with_tools = llm.bind_tools(tools)
-    tool_map = {"rag_search": rag_search}
-
-    # ── 构建消息 ───────────────────────────────────────────────
     from backend.skills import load_skill_body, pick_report_template
 
     template_id, template_focus = pick_report_template(topic)
     skill_body = load_skill_body("report")
-    skill_block = f"\n\n【Report Skill】\n{skill_body}\n" if skill_body else ""
-    messages: list = [SystemMessage(content=WRITER_SYSTEM_PROMPT + skill_block)]
+    if skill_body:
+        logger.debug("已加载 report SKILL.md")
 
-    if review_feedback:
-        # 有修改意见 → 基于已有报告进行修改
-        existing_report = state.get("report_draft", "")
-        messages.append(
-            HumanMessage(
-                content=(
-                    f"研究主题：{topic}\n"
-                    f"报告模板：{template_id} — {template_focus}\n\n"
-                    f"以下是之前的报告草稿：\n\n{existing_report}\n\n"
-                    f"---\n\n"
-                    f"审核修改意见：\n{review_feedback}\n\n"
-                    f"请根据以上修改意见对报告进行修改，确保质量提升。"
-                    f"直接输出修改后的完整报告（Markdown 格式）。"
-                )
-            )
-        )
-    else:
-        # 首次撰写
-        messages.append(
-            HumanMessage(
-                content=(
-                    f"研究主题：{topic}\n"
-                    f"报告模板：{template_id} — {template_focus}\n\n"
-                    f"以下是分析师提供的分析数据，请据此撰写完整的文献综述报告：\n\n"
-                    f"{analysis_text}\n\n"
-                    f"---\n\n"
-                    f"引用来源列表（请在报告中使用 [数字] 格式引用这些来源）：\n\n"
-                    f"{references_text}"
-                )
-            )
-        )
-
-    # ── 工具调用循环（最多 3 轮）─────────────────────────────
+    # ── 分节撰稿：多次短调用拼装（降低中转站长请求 524）────────
     try:
-        for round_idx in range(3):
-            response = await llm_with_tools.ainvoke(messages)
-            messages.append(response)
-
-            if not response.tool_calls:
-                logger.info(f"撰稿人第 {round_idx + 1} 轮无工具调用，结束循环")
-                break
-
-            for tc in response.tool_calls:
-                tool_name = tc["name"]
-                tool_args = tc["args"]
-                tool_id = tc["id"]
-                logger.info(f"撰稿人调用工具: {tool_name}, 参数: {tool_args}")
-
-                tool_func = tool_map.get(tool_name)
-                if tool_func:
-                    try:
-                        # 同步工具（RAG 检索）放线程池，避免阻塞事件循环
-                        result = await asyncio.to_thread(tool_func.invoke, tool_args)
-                    except Exception as tool_err:
-                        result = f"工具调用失败: {tool_err}"
-                        logger.error(f"工具 {tool_name} 执行失败: {tool_err}")
-                else:
-                    result = f"未知工具: {tool_name}"
-                    logger.warning(f"未知工具: {tool_name}")
-
-                messages.append(ToolMessage(content=str(result), tool_call_id=tool_id))
-
-        # 如果最后一轮有工具调用，再调用一次 LLM 获取最终报告
-        if response.tool_calls:
-            response = await llm_with_tools.ainvoke(messages)
-
-        report_draft = response.content.strip()
-        report_draft = _strip_llm_preamble(report_draft)
+        report_draft = await _write_report_sectioned(
+            llm,
+            topic=topic,
+            template_id=template_id,
+            template_focus=template_focus,
+            analysis_text=analysis_text,
+            references_text=references_text,
+            review_feedback=review_feedback,
+        )
         issues = _validate_report(report_draft)
         if issues:
-            logger.warning(f"撰稿输出质量校验失败: {issues}，尝试重写一次")
-            messages.append(
-                HumanMessage(
-                    content=(
-                        "上一版报告未通过质量校验，问题："
-                        + "；".join(issues)
-                        + "。请直接输出一份干净的完整 Markdown 综述："
-                        "以 # 标题开头，禁止过程说明，禁止整篇重贴，"
-                        "禁止重复摘要/参考文献章节，禁止乱码。"
-                    )
-                )
-            )
-            try:
-                retry_resp = await llm_with_tools.ainvoke(messages)
-                retry_text = _strip_llm_preamble(str(retry_resp.content or "").strip())
-                retry_issues = _validate_report(retry_text)
-                if retry_text and (not retry_issues or len(retry_issues) < len(issues)):
-                    report_draft = retry_text
-                    issues = retry_issues
-            except Exception as retry_err:
-                logger.warning(f"撰稿重写失败: {retry_err}")
-        if issues:
-            logger.warning(f"撰稿仍存在质量问题（已保留清洗结果）: {issues}")
-        msg = response if not review_feedback else HumanMessage(content="报告已修改完成")
-        logger.info(f"撰稿人生成报告，长度: {len(report_draft)} 字符")
+            logger.warning(f"分节拼装后结构校验: {issues[:8]}")
+        msg = HumanMessage(
+            content="报告已按章节生成" if not review_feedback else "报告已按修改意见分节重写"
+        )
+        logger.info(f"撰稿人分节生成完成，长度: {len(report_draft)} 字符")
     except Exception as e:
-        logger.error(f"撰稿人 LLM 调用失败: {e}")
-        err_s = str(e)
-        if "524" in err_s or "timeout" in err_s.lower() or "timed out" in err_s.lower():
-            try:
-                from backend.skills import load_skill_body as _lsb  # noqa: F401
-                from backend.utils.citations import reconcile_references as _rec
-                from backend.utils.quality import quality_score_report as _qs
-
-                short_prompt = HumanMessage(
-                    content=(
-                        f"请用较短篇幅（1500-2500字）撰写文献综述。\n"
-                        f"主题：{topic}\n模板：{template_id} — {template_focus}\n"
-                        f"仅使用下列真实文献引用 [1]..[{max(1, len(references))}]：\n"
-                        f"{references_text[:4000]}\n"
-                        f"分析摘要：\n{analysis_text[:2500]}\n"
-                        f"必须以 # 标题开头，含摘要/引言/研究现状/方法/挑战/总结/参考文献。"
-                    )
-                )
-                response = await llm.ainvoke(
-                    [SystemMessage(content=WRITER_SYSTEM_PROMPT), short_prompt]
-                )
-                draft = _strip_llm_preamble(str(response.content or "").strip())
-                draft, real_refs, _ = _rec(draft, references)
-                q_rep = _qs(draft, real_refs)
-                logger.info(f"撰稿降级重试成功，长度 {len(draft)}")
-                return {
-                    "report_draft": draft,
-                    "current_phase": "reviewing",
-                    "references": real_refs,
-                    "quality_metrics": {"report": q_rep},
-                    "messages": [HumanMessage(content="撰稿网关超时后已降级重写")],
-                }
-            except Exception as e2:
-                logger.error(f"撰稿降级重试仍失败: {e2}")
-                e = e2
-        report_draft = f"# {topic}\n\n> 任务失败：LLM 调用错误 - {e}"
+        logger.error(f"撰稿人分节生成失败: {e}")
         return {
-            "report_draft": report_draft,
+            "report_draft": f"# {topic}\n\n> 任务失败：LLM 调用错误 - {e}",
             "current_phase": "failed",
             "messages": [HumanMessage(content=f"撰稿人调用失败: {e}")],
         }
@@ -276,38 +280,18 @@ async def writer_agent(state: dict) -> dict[str, Any]:
     # ── 正文引用编号与文献列表对账（只保留真实文献）────────────
     from backend.skills import validate_report_structure
     from backend.utils.citations import reconcile_references
-    from backend.utils.quality import quality_score_report, should_retry_report
+    from backend.utils.quality import quality_score_report
 
     report_draft, real_refs, cite_issues = reconcile_references(report_draft, references)
     if cite_issues:
         logger.warning(f"引用对账: {cite_issues}")
 
-    # ── 结构校验 + 质量分；过低再逼一次重写 ─────────────────────
     struct_issues = validate_report_structure(report_draft)
     q_rep = quality_score_report(report_draft, real_refs)
-    if should_retry_report(q_rep):
-        logger.warning(f"报告质量分偏低 {q_rep}，尝试一次结构化重写")
-        messages.append(
-            HumanMessage(
-                content=(
-                    "上一版未通过结构质量门禁，问题："
-                    + "；".join((q_rep.get("issues") or struct_issues)[:8])
-                    + "。请输出完整综述：必须含摘要/引言/研究现状/方法/挑战/总结/参考文献，"
-                    "且仅使用提供的真实文献编号。"
-                )
-            )
-        )
-        try:
-            retry = await llm_with_tools.ainvoke(messages)
-            retry_text = _strip_llm_preamble(str(retry.content or "").strip())
-            retry_text, real_refs, _ = reconcile_references(retry_text, real_refs or references)
-            q2 = quality_score_report(retry_text, real_refs)
-            if q2.get("score", 0) > q_rep.get("score", 0):
-                report_draft = retry_text
-                q_rep = q2
-                logger.info(f"结构化重写后质量分: {q_rep.get('score')}")
-        except Exception as e:
-            logger.warning(f"结构化重写失败: {e}")
+    if struct_issues:
+        logger.warning(f"结构校验: {struct_issues[:8]}")
+    if q_rep.get("score", 1.0) < 0.45:
+        logger.warning(f"报告质量分偏低 {q_rep}（分节拼装已尽力，保留结果）")
 
     return {
         "report_draft": report_draft,
