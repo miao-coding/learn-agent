@@ -117,6 +117,8 @@ async def searcher_agent(state: dict, config: RunnableConfig) -> dict[str, Any]:
         api_key=llm_cfg["api_key"],
         base_url=llm_cfg["base_url"],
         temperature=0.1,
+        timeout=180,
+        max_retries=2,
     )
     tools = [
         academic_fallback_search,
@@ -190,6 +192,27 @@ async def searcher_agent(state: dict, config: RunnableConfig) -> dict[str, Any]:
             logger.info("程序化预检索完成，已写入 search_results")
     except Exception as e:
         logger.warning(f"程序化预检索失败: {e}")
+
+    # ── 程序化 Tavily 一次（Key 已配置时强制补充，不依赖 LLM 是否选用）──
+    try:
+        from backend.config import settings as _st
+
+        tav = (_st.tavily_api_key or "").strip()
+        if tav and not tav.startswith("your-"):
+            tquery = f"{topic} survey review research"
+            await report_progress(config, f"⚡ Tavily 补充检索：{tquery[:60]}")
+            tav_out = await asyncio.to_thread(tavily_search.invoke, {"query": tquery})
+            tav_text = str(tav_out or "")
+            if tav_text and not _is_tool_failure(tav_text):
+                all_search_results.append(
+                    {"query": tquery, "result": tav_text, "source": "web"}
+                )
+                logger.info("程序化 Tavily 检索完成")
+            else:
+                tool_failures.append(f"tavily_pre: {tav_text[:80]}")
+    except Exception as e:
+        logger.warning(f"程序化 Tavily 检索失败: {e}")
+        tool_failures.append(f"tavily_pre: {e}")
 
     # 若预搜已足够，LLM 只需 2 轮做补充；否则 4 轮
     pre_refs = build_references_from_search_results(

@@ -134,6 +134,8 @@ async def analyst_agent(state: dict, config=None) -> dict[str, Any]:
         api_key=llm_cfg["api_key"],
         base_url=llm_cfg["base_url"],
         temperature=0.1,
+        timeout=180,
+        max_retries=2,
     )
 
     visualization_tools = [

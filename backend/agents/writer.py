@@ -113,11 +113,14 @@ async def writer_agent(state: dict) -> dict[str, Any]:
 
     # ── 初始化 LLM 并绑定工具 ─────────────────────────────────
     llm_cfg = settings.resolve_llm_config(state.get("model_name"))
+    # 长文生成易被网关 524 掐断：加大客户端超时并自动重试
     llm = ChatOpenAI(
         model=llm_cfg["model"],
         api_key=llm_cfg["api_key"],
         base_url=llm_cfg["base_url"],
         temperature=0.3,  # 撰稿需要一定创造性
+        timeout=600,
+        max_retries=3,
     )
 
     tools = [rag_search]
@@ -229,6 +232,40 @@ async def writer_agent(state: dict) -> dict[str, Any]:
         logger.info(f"撰稿人生成报告，长度: {len(report_draft)} 字符")
     except Exception as e:
         logger.error(f"撰稿人 LLM 调用失败: {e}")
+        err_s = str(e)
+        if "524" in err_s or "timeout" in err_s.lower() or "timed out" in err_s.lower():
+            try:
+                from backend.skills import load_skill_body as _lsb  # noqa: F401
+                from backend.utils.citations import reconcile_references as _rec
+                from backend.utils.quality import quality_score_report as _qs
+
+                short_prompt = HumanMessage(
+                    content=(
+                        f"请用较短篇幅（1500-2500字）撰写文献综述。\n"
+                        f"主题：{topic}\n模板：{template_id} — {template_focus}\n"
+                        f"仅使用下列真实文献引用 [1]..[{max(1, len(references))}]：\n"
+                        f"{references_text[:4000]}\n"
+                        f"分析摘要：\n{analysis_text[:2500]}\n"
+                        f"必须以 # 标题开头，含摘要/引言/研究现状/方法/挑战/总结/参考文献。"
+                    )
+                )
+                response = await llm.ainvoke(
+                    [SystemMessage(content=WRITER_SYSTEM_PROMPT), short_prompt]
+                )
+                draft = _strip_llm_preamble(str(response.content or "").strip())
+                draft, real_refs, _ = _rec(draft, references)
+                q_rep = _qs(draft, real_refs)
+                logger.info(f"撰稿降级重试成功，长度 {len(draft)}")
+                return {
+                    "report_draft": draft,
+                    "current_phase": "reviewing",
+                    "references": real_refs,
+                    "quality_metrics": {"report": q_rep},
+                    "messages": [HumanMessage(content="撰稿网关超时后已降级重写")],
+                }
+            except Exception as e2:
+                logger.error(f"撰稿降级重试仍失败: {e2}")
+                e = e2
         report_draft = f"# {topic}\n\n> 任务失败：LLM 调用错误 - {e}"
         return {
             "report_draft": report_draft,
