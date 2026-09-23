@@ -217,7 +217,7 @@ async def searcher_agent(state: dict, config: RunnableConfig) -> dict[str, Any]:
     # 若预搜已足够，LLM 只需 2 轮做补充；否则 4 轮
     pre_refs = build_references_from_search_results(
         [
-            {"source": s.get("source"), "query": s.get("query"), "content": s.get("result")}
+            {"source": s.get("source"), "query": s.get("query"), "content": s.get("result") or s.get("content")}
             for s in all_search_results
         ]
     )
@@ -381,16 +381,17 @@ async def searcher_agent(state: dict, config: RunnableConfig) -> dict[str, Any]:
                     )
                 )
 
-    # ── 整理搜索结果（区分来源，过滤失败文本） ─────────────────
+    # ── 整理搜索结果（区分来源，过滤失败文本；兼容 result/content 键）──
     search_results: list[dict[str, Any]] = []
     for item in all_search_results:
-        if _is_tool_failure(item.get("result", "")):
+        body = item.get("result") or item.get("content") or ""
+        if _is_tool_failure(body):
             continue
         source = item.get("source", "web")
         search_results.append(
             {
-                "query": item["query"],
-                "content": item["result"],
+                "query": item.get("query", ""),
+                "content": body,
                 "source": source,
                 "timestamp": timestamp,
             }
