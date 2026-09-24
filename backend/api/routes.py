@@ -43,9 +43,10 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["research"])
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  活跃任务管理：thread_id → asyncio.Queue
+#  活跃任务管理：内存中执行的任务 thread_id 集合
+#  （事件经 progress_bus 发布：有界日志 + 每连接独立订阅队列）
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-active_tasks: dict[str, asyncio.Queue] = {}
+active_tasks: set[str] = set()
 # 任务开始时间与主题，供「进行中任务」显示
 task_started_at: dict[str, float] = {}
 task_meta: dict[str, dict] = {}
@@ -78,8 +79,7 @@ def _get_graph(request: Request):
 async def start_research(request: Request, body: ResearchRequest):
     """提交研究任务，启动后台图执行，返回 thread_id"""
     thread_id = str(uuid.uuid4())
-    event_queue: asyncio.Queue = asyncio.Queue()
-    active_tasks[thread_id] = event_queue
+    active_tasks.add(thread_id)
     task_started_at[thread_id] = time.time()
     task_meta[thread_id] = {"topic": body.topic[:80], "model": body.model_name or ""}
 
@@ -122,7 +122,6 @@ async def start_research(request: Request, body: ResearchRequest):
             graph,
             thread_id,
             body.topic,
-            event_queue,
             model_name=body.model_name or "",
             uploaded_docs=uploaded_docs,
         ),
@@ -180,11 +179,10 @@ async def _run_graph(
     graph: Any,
     thread_id: str,
     topic: str,
-    queue: asyncio.Queue,
     model_name: str = "",
     uploaded_docs: list[dict] | None = None,
 ) -> None:
-    """后台执行 LangGraph 图，将事件推送到 asyncio.Queue 供 SSE 消费"""
+    """后台执行 LangGraph 图，事件经 progress_bus 发布（日志 + SSE 扇出）"""
     config = {"configurable": {"thread_id": thread_id}}
     initial_state = {
         "topic": topic,
@@ -192,10 +190,8 @@ async def _run_graph(
         "messages": [],
         "uploaded_docs": uploaded_docs or [],
     }
-    # 注册进度总线：Agent 节点内可通过 report_progress 推送工具级实时进度
-    progress_bus.register(thread_id, queue)
     # 立即点亮检索阶段（节点 update 要等节点完成才推送，先发一个初始 phase）
-    await queue.put({"event": "phase", "data": {"phase": "searching"}})
+    progress_bus.publish(thread_id, {"event": "phase", "data": {"phase": "searching"}})
 
     try:
         async for event in graph.astream(
@@ -211,30 +207,28 @@ async def _run_graph(
 
             if mode == "updates":
                 # data 是 dict: {node_name: state_update}
-                await _handle_update_event(data, thread_id, queue)
+                await _handle_update_event(data, thread_id)
 
             elif mode == "messages":
                 # data 是 tuple: (message_chunk, metadata)
-                await _handle_message_event(data, queue)
+                _handle_message_event(data, thread_id)
 
         # 图执行完毕：区分「等待人工审核」与「真正完成」
-        await _finalize_stream(graph, config, queue)
+        await _finalize_stream(graph, config, thread_id)
 
     except Exception as e:
         logger.exception(f"图执行异常: thread_id={thread_id}")
-        await queue.put({"event": "error", "data": {"message": str(e)}})
-        await queue.put({"event": "done", "data": ""})
+        progress_bus.publish(thread_id, {"event": "error", "data": {"message": str(e)}})
+        progress_bus.publish(thread_id, {"event": "done", "data": ""})
     finally:
-        # 延迟清理，让 SSE 客户端有时间读取
+        # 延迟清理，让 SSE 客户端有时间读取；事件日志保留一段时间供重连补齐
         await asyncio.sleep(2)
-        progress_bus.unregister(thread_id)
-        active_tasks.pop(thread_id, None)
+        active_tasks.discard(thread_id)
         task_started_at.pop(thread_id, None)
         task_meta.pop(thread_id, None)
-        # 保留 progress 缓冲一段时间，不在此清空
 
 
-async def _finalize_stream(graph: Any, config: dict, queue: asyncio.Queue) -> None:
+async def _finalize_stream(graph: Any, config: dict, thread_id: str) -> None:
     """图流结束后的收尾：区分「等待人工审核 / 失败 / 真正完成」
 
     update_state 审核模式下，reviewer 之后图会正常 END；此时通过
@@ -247,19 +241,18 @@ async def _finalize_stream(graph: Any, config: dict, queue: asyncio.Queue) -> No
     final_phase = (snap.values or {}).get("current_phase", "") if snap else ""
     if final_phase == "reviewing":
         # interrupt 审核事件已在 _handle_update_event 中推送
-        await queue.put({"event": "done", "data": ""})
+        progress_bus.publish(thread_id, {"event": "done", "data": ""})
     elif final_phase == "failed":
-        await queue.put({"event": "phase", "data": {"phase": "failed"}})
-        await queue.put({"event": "done", "data": ""})
+        progress_bus.publish(thread_id, {"event": "phase", "data": {"phase": "failed"}})
+        progress_bus.publish(thread_id, {"event": "done", "data": ""})
     else:
-        await queue.put({"event": "phase", "data": {"phase": "completed"}})
-        await queue.put({"event": "done", "data": ""})
+        progress_bus.publish(thread_id, {"event": "phase", "data": {"phase": "completed"}})
+        progress_bus.publish(thread_id, {"event": "done", "data": ""})
 
 
 async def _handle_update_event(
     data: dict[str, Any],
     thread_id: str,
-    queue: asyncio.Queue,
 ) -> None:
     """处理 stream_mode='updates' 的事件"""
     for node_name, state_update in data.items():
@@ -270,8 +263,8 @@ async def _handle_update_event(
         node_phase = NODE_PHASE_MAP.get(node_name)
         emitted_phase = state_update.get("current_phase") or ""
         if emitted_phase == "failed":
-            await queue.put({"event": "phase", "data": {"phase": "failed"}})
-            await queue.put({
+            progress_bus.publish(thread_id, {"event": "phase", "data": {"phase": "failed"}})
+            progress_bus.publish(thread_id, {
                 "event": "error",
                 "data": {
                     "message": state_update.get("report_draft", "")
@@ -279,19 +272,21 @@ async def _handle_update_event(
                 },
             })
         elif emitted_phase and emitted_phase not in ("", "init"):
-            await queue.put({"event": "phase", "data": {"phase": emitted_phase}})
+            progress_bus.publish(thread_id, {"event": "phase", "data": {"phase": emitted_phase}})
         elif node_phase:
-            await queue.put({"event": "phase", "data": {"phase": node_phase}})
+            progress_bus.publish(thread_id, {"event": "phase", "data": {"phase": node_phase}})
 
         # 审核等待：reviewer 完成后图正常 END，推送审核请求
         # （update_state 审核模式，前端协议沿用 interrupt 事件）
         if node_name == "reviewer" and state_update.get("current_phase") == "reviewing":
-            await queue.put({
+            progress_bus.publish(thread_id, {
                 "event": "interrupt",
                 "data": {
                     "thread_id": thread_id,
                     "report_draft": state_update.get("final_report", ""),
                     "message": "请审核综述草稿，输入修改意见或输入 '通过' 通过审核。",
+                    "revision_count": state_update.get("revision_count", 0),
+                    "max_revisions": state_update.get("max_revisions", 3),
                 },
             })
 
@@ -300,19 +295,27 @@ async def _handle_update_event(
         if current_phase and current_phase != "failed":
             progress_msg = _build_progress_message(node_name, current_phase, state_update)
             if progress_msg:
-                await queue.put({"event": "progress", "data": {"message": progress_msg}})
+                progress_bus.publish(thread_id, {"event": "progress", "data": {"message": progress_msg}})
 
         # 检查是否完成（最终报告）
         final_report = state_update.get("final_report", "")
         if final_report and current_phase == "completed":
-            await queue.put({"event": "complete", "data": {"report": final_report}})
+            progress_bus.publish(thread_id, {
+                "event": "complete",
+                "data": {
+                    "report": final_report,
+                    "references": state_update.get("references") or [],
+                    "charts": state_update.get("charts") or [],
+                    "quality_metrics": state_update.get("quality_metrics") or {},
+                },
+            })
 
 
-async def _handle_message_event(
+def _handle_message_event(
     data: tuple,
-    queue: asyncio.Queue,
+    thread_id: str,
 ) -> None:
-    """处理 stream_mode='messages' 的事件 — LLM token 流"""
+    """处理 stream_mode='messages' 的事件 — LLM token 流（仅实时扇出，不进日志）"""
     if not isinstance(data, tuple) or len(data) < 1:
         return
 
@@ -325,7 +328,7 @@ async def _handle_message_event(
         content = chunk.get("content", "")
 
     if content:
-        await queue.put({"event": "token", "data": {"content": content}})
+        progress_bus.publish(thread_id, {"event": "token", "data": {"content": content}})
 
 
 def _build_progress_message(
@@ -349,49 +352,69 @@ def _build_progress_message(
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 @router.get("/research/{thread_id}/progress")
 async def get_task_progress(thread_id: str, limit: int = 50):
-    """任务进度历史（内存缓冲），供刷新/重连后补齐日志"""
-    from backend.utils.progress import get_progress_messages
+    """任务进度历史（内存事件日志），供刷新/重连后补齐日志
 
+    返回 upto_seq：客户端应带 ?since=upto_seq 连 /stream，只重放其后事件。
+    """
+    from backend.utils.progress import get_progress_snapshot
+
+    messages, upto_seq = get_progress_snapshot(thread_id, limit=limit)
     return {
         "thread_id": thread_id,
-        "messages": get_progress_messages(thread_id, limit=limit),
+        "messages": messages,
         "started_at": float(task_started_at.get(thread_id) or 0),
+        "upto_seq": upto_seq,
     }
 
 
 @router.get("/research/{thread_id}/stream")
-async def stream_research(thread_id: str):
-    """SSE 流式推送研究进度"""
-    if thread_id not in active_tasks:
+async def stream_research(thread_id: str, since: int = 0):
+    """SSE 流式推送研究进度（多订阅者 + 断线重放）
+
+    - 每个连接独立订阅队列：多标签页互不抢事件
+    - 先重放事件日志中 since 之后的事件，再持续推送新事件
+    - 任务已结束（不在内存执行）时：日志里有 done 终止事件才服务，
+      重放完毕即关闭；否则 404（前端走 resume/回查降级）
+    """
+    is_active = thread_id in active_tasks
+    if not is_active and not progress_bus.has_terminal_event(thread_id):
         raise HTTPException(status_code=404, detail="Task not found or already completed")
 
-    event_queue = active_tasks[thread_id]
+    queue, replay = progress_bus.subscribe(thread_id, since=since)
+
+    def _fmt(event: dict) -> str:
+        event_data = event.get("data", "")
+        if isinstance(event_data, dict):
+            data_str = json.dumps(event_data, ensure_ascii=False)
+        else:
+            data_str = str(event_data)
+        return f"event: {event.get('event', '')}\ndata: {data_str}\n\n"
 
     async def event_generator():
         try:
+            for event in replay:
+                yield _fmt(event)
+                if event.get("event") == "done":
+                    return
+            if not is_active:
+                # 任务已结束且重放中无 done（since 已越过终止事件）：直接关闭
+                return
             while True:
                 try:
-                    event = await asyncio.wait_for(event_queue.get(), timeout=2)
+                    event = await asyncio.wait_for(queue.get(), timeout=2)
                 except asyncio.TimeoutError:
                     # 心跳：2s 一次，驱动前端计时近似每秒刷新，并防代理断连
                     yield ": heartbeat\n\n"
                     continue
 
-                event_type = event.get("event", "")
-                event_data = event.get("data", "")
-
-                if event_type == "done":
+                if event.get("event") == "done":
                     break
 
-                # 格式化为 SSE 格式
-                if isinstance(event_data, dict):
-                    data_str = json.dumps(event_data, ensure_ascii=False)
-                else:
-                    data_str = str(event_data)
-
-                yield f"event: {event_type}\ndata: {data_str}\n\n"
+                yield _fmt(event)
         except asyncio.CancelledError:
             logger.info(f"SSE 连接已断开: thread_id={thread_id}")
+        finally:
+            progress_bus.unsubscribe(thread_id, queue)
 
     return StreamingResponse(
         event_generator(),
@@ -411,9 +434,9 @@ async def stream_research(thread_id: str):
 async def submit_review(request: Request, thread_id: str, body: ReviewRequest):
     """提交人工审核结果（update_state 审核模式）
 
-    - 通过：注入 current_phase="completed"，条件边判定图结束
-    - 返工：注入 review_feedback / current_phase="writing"，从断点
-      继续执行 writer → reviewer，SSE 实时推送修改进度
+    - action=approve（或旧文本"通过"）：注入 current_phase="completed"，条件边判定图结束
+    - action=revise：注入 review_feedback / current_phase="writing"，writer 以
+      上一版草稿为底稿分节修订，SSE 实时推送修改进度
     """
     graph = _get_graph(request)
     config = {"configurable": {"thread_id": thread_id}}
@@ -435,15 +458,25 @@ async def submit_review(request: Request, thread_id: str, body: ReviewRequest):
         raise HTTPException(status_code=400, detail="当前状态不可审核（任务未就绪或已完成）")
 
     feedback = body.feedback.strip()
-    is_approved = feedback.lower() in ["通过", "approve", "approved", "ok", "good", ""]
+    action = (body.action or "").strip().lower()
+    if not action:
+        # 兼容旧客户端：未显式传 action 时按文本判断（新前端一律显式传 action）
+        action = (
+            "approve"
+            if feedback.lower() in ["通过", "approve", "approved", "ok", "good", ""]
+            else "revise"
+        )
 
-    if is_approved:
+    if action == "approve":
         await graph.aupdate_state(
             config,
             {"current_phase": "completed", "review_feedback": None},
             as_node="reviewer",
         )
         return ReviewResponse(thread_id=thread_id, status="approved", message="报告已审核通过")
+
+    if not feedback:
+        raise HTTPException(status_code=400, detail="返工需要填写修改意见")
 
     revision_count = values.get("revision_count", 0)
     max_revisions = values.get("max_revisions", 3)
@@ -464,13 +497,11 @@ async def submit_review(request: Request, thread_id: str, body: ReviewRequest):
         as_node="reviewer",
     )
 
-    # 创建 SSE 队列用于返工场景的流式推送
-    event_queue: asyncio.Queue = asyncio.Queue()
-    active_tasks[thread_id] = event_queue
-
     # 后台从断点继续执行（不阻塞 HTTP 响应）
+    active_tasks.add(thread_id)
+    task_started_at.setdefault(thread_id, time.time())
     asyncio.create_task(
-        _resume_and_stream(graph, thread_id, event_queue, config),
+        _resume_and_stream(graph, thread_id, config),
         name=f"review-{thread_id}",
     )
 
@@ -501,11 +532,10 @@ async def resume_interrupted_task(request: Request, thread_id: str):
     if status not in ("initializing", "searching", "analyzing", "writing"):
         return ReviewResponse(thread_id=thread_id, status=status, message="任务不在可恢复的运行状态")
 
-    event_queue: asyncio.Queue = asyncio.Queue()
-    active_tasks[thread_id] = event_queue
-    progress_bus.register(thread_id, event_queue)
+    active_tasks.add(thread_id)
+    task_started_at.setdefault(thread_id, time.time())
     asyncio.create_task(
-        _resume_and_stream(graph, thread_id, event_queue, config),
+        _resume_and_stream(graph, thread_id, config),
         name=f"resume-{thread_id}",
     )
     logger.info(f"复活中断任务: thread_id={thread_id}, phase={status}")
@@ -515,15 +545,13 @@ async def resume_interrupted_task(request: Request, thread_id: str):
 async def _resume_and_stream(
     graph: Any,
     thread_id: str,
-    queue: asyncio.Queue,
     config: dict,
 ) -> None:
-    """后台从断点继续执行图并流式推送事件
+    """后台从断点继续执行图并经 progress_bus 发布事件
 
     update_state 审核模式下使用 astream(None) 从上次结束的位置继续，
-    复用与 _run_graph 相同的事件解析和推送逻辑。
+    复用与 _run_graph 相同的事件解析和发布逻辑。
     """
-    progress_bus.register(thread_id, queue)
     try:
         async for event in graph.astream(None, config=config, stream_mode=["updates", "messages"]):
             # astream 在 stream_mode=list 时返回 tuple: (mode, data)
@@ -533,26 +561,24 @@ async def _resume_and_stream(
             mode, data = event
 
             if mode == "updates":
-                await _handle_update_event(data, thread_id, queue)
+                await _handle_update_event(data, thread_id)
 
             elif mode == "messages":
-                await _handle_message_event(data, queue)
+                _handle_message_event(data, thread_id)
 
         # 图执行完毕：返工后再次进入等待审核或完成
-        await _finalize_stream(graph, config, queue)
+        await _finalize_stream(graph, config, thread_id)
 
     except Exception as e:
         logger.exception(f"图恢复执行异常: thread_id={thread_id}")
-        await queue.put({"event": "error", "data": {"message": str(e)}})
-        await queue.put({"event": "done", "data": ""})
+        progress_bus.publish(thread_id, {"event": "error", "data": {"message": str(e)}})
+        progress_bus.publish(thread_id, {"event": "done", "data": ""})
     finally:
-        # 延迟清理，让 SSE 客户端有时间读取
+        # 延迟清理，让 SSE 客户端有时间读取；事件日志保留一段时间供重连补齐
         await asyncio.sleep(2)
-        progress_bus.unregister(thread_id)
-        active_tasks.pop(thread_id, None)
+        active_tasks.discard(thread_id)
         task_started_at.pop(thread_id, None)
         task_meta.pop(thread_id, None)
-        # 保留 progress 缓冲一段时间，不在此清空
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -589,6 +615,8 @@ async def get_report(request: Request, thread_id: str):
             references=values.get("references", []),
             charts=values.get("charts", []),
             quality_metrics=values.get("quality_metrics") or {},
+            revision_count=int(values.get("revision_count") or 0),
+            max_revisions=int(values.get("max_revisions") or 3),
         )
 
     except HTTPException:
@@ -804,18 +832,31 @@ async def list_history(request: Request, limit: int = 20):
 
 
 @router.get("/research/running", response_model=list[RunningTaskItem])
-async def list_running_tasks():
-    """当前仍在内存中执行的任务（侧边栏「进行中」）"""
+async def list_running_tasks(request: Request):
+    """当前仍在内存中执行的任务（侧边栏「进行中」）
+
+    phase 从 checkpoint 读取（节点边界粒度），前端恢复视图时据此点亮
+    正确阶段，而不是一律当作 searching。
+    """
+    graph = getattr(request.app.state, "graph", None)
     running: list[RunningTaskItem] = []
     now = time.time()
-    for tid in list(active_tasks.keys()):
+    for tid in list(active_tasks):
         started = task_started_at.get(tid)
         meta = task_meta.get(tid) or {}
+        phase = ""
+        if graph is not None:
+            try:
+                snap = await graph.aget_state({"configurable": {"thread_id": tid}})
+                phase = str(((snap.values or {}) if snap else {}).get("current_phase") or "")
+            except Exception:
+                phase = ""
         running.append(
             RunningTaskItem(
                 thread_id=tid,
                 topic=str(meta.get("topic") or "")[:60],
                 status="running",
+                phase=phase,
                 elapsed_sec=int(now - started) if started else 0,
                 started_at=float(started or 0.0),
             )
@@ -866,8 +907,8 @@ async def delete_research(thread_id: str, request: Request):
     if not thread_id or len(thread_id) > 128:
         raise HTTPException(status_code=400, detail="无效的 thread_id")
 
-    # 从活跃 SSE 队列摘除（运行中任务删除后不再推送）
-    active_tasks.pop(thread_id, None)
+    # 从活跃任务摘除（运行中任务删除后不再推送）
+    active_tasks.discard(thread_id)
     try:
         progress_bus.clear_progress(thread_id)
     except Exception:

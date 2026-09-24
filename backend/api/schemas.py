@@ -105,7 +105,8 @@ class AdminTestResponse(BaseModel):
 
 class ReviewRequest(BaseModel):
     """人工审核请求"""
-    feedback: str  # "通过" 或修改意见
+    feedback: str = ""  # 修改意见（approve 时可空）
+    action: str = ""    # approve / revise；空则按旧文本规则兼容
 
 
 class ReviewResponse(BaseModel):
@@ -124,6 +125,8 @@ class ReportResponse(BaseModel):
     references: list[dict] = []
     charts: list[str] = []
     quality_metrics: dict = {}
+    revision_count: int = 0
+    max_revisions: int = 3
 
 
 class HealthResponse(BaseModel):
@@ -146,6 +149,7 @@ class RunningTaskItem(BaseModel):
     thread_id: str
     topic: str = ""
     status: str = ""
+    phase: str = ""
     elapsed_sec: int = 0
     started_at: float = 0.0
 

@@ -102,6 +102,40 @@ _REPORT_SECTIONS: list[dict[str, Any]] = [
 ]
 
 
+def _split_previous_sections(previous_report: str) -> dict[str, str]:
+    """把上一版报告按二级标题切块，宽松匹配到分节撰稿的章节 key
+
+    标题匹配容忍编号/措辞差异（如「## 1. 引言」vs「## 引言」）；
+    参考文献等未匹配块忽略（由引用对账统一重写，不进 LLM）。
+    """
+    import re
+
+    if not previous_report or not previous_report.strip():
+        return {}
+
+    section_words = {
+        "abstract": ("摘要", "abstract"),
+        "intro": ("引言", "introduction", "背景", "background"),
+        "taxonomy": ("现状", "分类", "taxonomy", "综述范围"),
+        "comparison": ("对比", "比较", "comparison", "性能分析"),
+        "challenges": ("挑战", "空白", "challenges", "局限"),
+        "conclusion": ("总结", "展望", "conclusion", "结论"),
+    }
+    result: dict[str, str] = {}
+    for block in re.split(r"(?m)^(?=##\s)", previous_report):
+        m = re.match(r"^##\s*(.+)$", block.strip(), flags=re.M)
+        if not m:
+            continue
+        title = m.group(1).strip().lower()
+        for key, words in section_words.items():
+            if key in result:
+                continue
+            if any(w in title for w in words):
+                result[key] = block.strip()
+                break
+    return result
+
+
 async def _generate_one_section(
     llm,
     *,
@@ -113,16 +147,23 @@ async def _generate_one_section(
     references_text: str,
     prior_outline: str,
     review_feedback: str | None = None,
+    previous_section: str = "",
 ) -> str:
-    """单次生成一个章节（短输出）"""
-    sys = SystemMessage(
-        content=(
-            "你是学术综述撰稿人。只输出本章节 Markdown 正文，"
-            "不要输出整篇报告，不要其它章节，不要过程说明。\n"
-            "引用只能使用提供的 [数字] 编号，禁止编造文献。"
+    """单次生成一个章节（短输出）；修订模式下基于上一版本章定向修改"""
+    sys_parts = [
+        "你是学术综述撰稿人。只输出本章节 Markdown 正文，"
+        "不要输出整篇报告，不要其它章节，不要过程说明。",
+        "引用只能使用提供的 [数字] 编号，禁止编造文献。",
+    ]
+    if previous_section:
+        sys_parts.append(
+            "你处于修订模式：下方提供该章节的上一版内容与审核修改意见。"
+            "若修改意见涉及本章，输出修订后的本章全文（保留原有结构与准确内容，仅做针对性修改）；"
+            "若与本章无关，原样输出上一版本章内容（不得改变实质内容与引用编号）。"
         )
-    )
+    sys = SystemMessage(content="\n".join(sys_parts))
     fb = f"\n审核修改意见（本章针对性改进）：\n{review_feedback}\n" if review_feedback else ""
+    prev = f"\n上一版本章内容：\n{previous_section[:2000]}\n" if previous_section else ""
     user = HumanMessage(
         content=(
             f"研究主题：{topic}\n"
@@ -132,6 +173,7 @@ async def _generate_one_section(
             f"全文大纲（只作衔接）：{prior_outline}\n"
             f"分析数据节选：\n{analysis_text[:3500]}\n\n"
             f"可用引用：\n{references_text[:3000]}\n"
+            f"{prev}"
             f"{fb}\n"
             f"直接输出该章节 Markdown。"
         )
@@ -149,12 +191,17 @@ async def _write_report_sectioned(
     analysis_text: str,
     references_text: str,
     review_feedback: str | None = None,
+    previous_report: str = "",
 ) -> str:
-    """按章节串行生成并拼装完整报告"""
+    """按章节串行生成并拼装完整报告（修订模式下基于上一版定向修改）"""
     parts: list[str] = [f"# {topic}"]
     outline = " / ".join(s["heading"].replace("#", "").strip() for s in _REPORT_SECTIONS)
+    prev_sections = (
+        _split_previous_sections(previous_report) if review_feedback and previous_report else {}
+    )
 
     for section in _REPORT_SECTIONS:
+        prev_section = prev_sections.get(section["key"], "")
         text = ""
         for attempt in range(2):
             try:
@@ -167,7 +214,8 @@ async def _write_report_sectioned(
                     analysis_text=analysis_text,
                     references_text=references_text,
                     prior_outline=outline,
-                    review_feedback=review_feedback,
+                    review_feedback=review_feedback if prev_section else None,
+                    previous_section=prev_section,
                 )
                 if text:
                     break
@@ -175,7 +223,11 @@ async def _write_report_sectioned(
                 logger.warning(f"章节 {section['key']} 第 {attempt + 1} 次失败: {e}")
                 await asyncio.sleep(2)
         if not text:
-            text = f"{section['heading']}\n\n（本节生成失败，已跳过）"
+            if prev_section:
+                # 本节修订失败：保留上一版，不用占位符毁稿
+                text = prev_section
+            else:
+                text = f"{section['heading']}\n\n（本节生成失败，已跳过）"
         if not text.lstrip().startswith("#"):
             text = f"{section['heading']}\n\n{text}"
         parts.append(text)
@@ -203,6 +255,9 @@ async def writer_agent(state: dict) -> dict[str, Any]:
     analysis_data = state.get("analysis_data", {})
     review_feedback = state.get("review_feedback")
     references = state.get("references", [])
+    # 返工时上一版草稿仍在 state 中：修订模式以它为底稿定向修改，
+    # 而不是拿同样的分析数据重新创作一份（旧实现的问题）
+    previous_report = (state.get("report_draft") or "") if review_feedback else ""
     logger.info(f"撰稿人开始工作，主题: {topic}")
 
     # 上游已失败：短路透传
@@ -214,7 +269,10 @@ async def writer_agent(state: dict) -> dict[str, Any]:
         }
 
     if review_feedback:
-        logger.info(f"撰稿人收到修改意见: {review_feedback}")
+        if previous_report:
+            logger.info(f"撰稿人进入修订模式：按修改意见分节修订（旧稿 {len(previous_report)} 字）")
+        else:
+            logger.info(f"撰稿人收到修改意见（无旧稿，按首写处理）: {review_feedback}")
 
     # ── 检查分析数据是否可用 ───────────────────────────────────
     if not analysis_data or analysis_data.get("error"):
@@ -261,6 +319,7 @@ async def writer_agent(state: dict) -> dict[str, Any]:
             analysis_text=analysis_text,
             references_text=references_text,
             review_feedback=review_feedback,
+            previous_report=previous_report,
         )
         issues = _validate_report(report_draft)
         if issues:
@@ -271,6 +330,14 @@ async def writer_agent(state: dict) -> dict[str, Any]:
         logger.info(f"撰稿人分节生成完成，长度: {len(report_draft)} 字符")
     except Exception as e:
         logger.error(f"撰稿人分节生成失败: {e}")
+        if review_feedback and previous_report:
+            # 修订失败保底：保留上一版报告并退回审核，不把旧稿覆盖成失败占位
+            return {
+                "report_draft": previous_report,
+                "final_report": previous_report,
+                "current_phase": "reviewing",
+                "messages": [HumanMessage(content=f"本次修改失败，已保留上一版：{e}")],
+            }
         return {
             "report_draft": f"# {topic}\n\n> 任务失败：LLM 调用错误 - {e}",
             "current_phase": "failed",

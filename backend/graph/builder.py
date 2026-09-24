@@ -96,6 +96,9 @@ async def reviewer_node(state: AgentState) -> dict[str, Any]:
     return {
         "final_report": report_draft,
         "current_phase": "reviewing",
+        # 回传返工计数，interrupt 事件据此告知前端当前是第几版
+        "revision_count": state.get("revision_count", 0),
+        "max_revisions": state.get("max_revisions", 3),
     }
 
 

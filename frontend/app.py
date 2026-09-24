@@ -400,6 +400,9 @@ def init_session_state():
         "is_reviewing": False,
         "error_message": "",
         "stream_consumed": False,
+        "writing_chars": 0,
+        "revision_count": 0,
+        "max_revisions": 3,
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -415,6 +418,7 @@ init_session_state()
 
 
 # ============ API 调用函数 ============
+@st.cache_data(ttl=15)
 def check_health() -> bool:
     """检查后端连接"""
     try:
@@ -424,6 +428,7 @@ def check_health() -> bool:
         return False
 
 
+@st.cache_data(ttl=30)
 def fetch_available_models() -> dict | None:
     """获取后端可用模型列表（未配置白名单时返回 None，前端隐藏选择框）"""
     try:
@@ -435,6 +440,7 @@ def fetch_available_models() -> dict | None:
         return None
 
 
+@st.cache_data(ttl=15)
 def get_admin_status() -> dict | None:
     """获取后端配置状态（在线配置是否启用、Key 是否已配置，不含密钥明文）"""
     try:
@@ -562,8 +568,9 @@ def delete_history(thread_id: str) -> bool:
         return False
 
 
+@st.cache_data(ttl=30)
 def fetch_dependencies() -> dict | None:
-    """获取后端外部依赖健康状态"""
+    """获取后端外部依赖健康状态（含 SearXNG 探活，轮询周期下需缓存）"""
     try:
         resp = requests.get(f"{API_BASE_URL}/api/dependencies", timeout=8)
         if resp.status_code == 200:
@@ -573,13 +580,36 @@ def fetch_dependencies() -> dict | None:
         return None
 
 
+def _probe_task_status(thread_id: str) -> str:
+    """回查任务的持久化状态（SSE 队列消失时判断任务是否其实已结束）"""
+    for h in fetch_history(50):
+        if h.get("thread_id") == thread_id:
+            return str(h.get("status") or "")
+    return ""
+
+
+_PHASE_ORDER = ["searching", "analyzing", "writing", "reviewing", "completed"]
+
+
+def _mark_phase_reached(phase: str) -> None:
+    """统一阶段点亮口径：到达某阶段时，之前的阶段标完成，当前阶段保持「进行中」"""
+    if phase not in _PHASE_ORDER:
+        return
+    idx = _PHASE_ORDER.index(phase)
+    for p in _PHASE_ORDER[:idx]:
+        st.session_state.phases[p] = True
+    if phase == "completed":
+        st.session_state.phases["completed"] = True
+
+
 def _restore_task(tid: str, topic: str, status: str) -> None:
     """从历史任务恢复会话状态
 
-    - 运行中（initializing/searching/analyzing/writing）：挂回实时 SSE 流，
-      继续接收后续进度事件（已错过的事件不重播，按当前状态近似点亮）
+    - 运行中（initializing/searching/analyzing/writing）：挂回实时 SSE 流；
+      断连期间积压在服务端队列的事件会重放，进度日志由服务端缓冲补齐
     - 等待审核（reviewing）：恢复审核区，可提交通过/返工
     - 已完成（completed）：直接展示最终报告
+    - 失败（failed）：展示失败信息
     """
     st.session_state.thread_id = tid
     st.session_state.topic = topic
@@ -592,9 +622,9 @@ def _restore_task(tid: str, topic: str, status: str) -> None:
         pass
     st.session_state.error_message = ""
     st.session_state.is_reviewing = status == "reviewing"
+    st.session_state.writing_chars = 0
 
     running_phases = ("initializing", "searching", "analyzing", "writing")
-    phase_order = ["searching", "analyzing", "writing"]
 
     # 若另有任务在跑：先把其进度快照存起来，避免被本函数清空
     prev_tid = st.session_state.get("running_task_id") or ""
@@ -605,6 +635,14 @@ def _restore_task(tid: str, topic: str, status: str) -> None:
 
     # 切到运行中任务：尽量保留/恢复进度，禁止无故清空
     is_running_status = status in running_phases
+    if is_running_status:
+        # 运行视图不得展示任何旧任务的报告/审核态（串台根因）
+        st.session_state.report = ""
+        st.session_state.report_draft = ""
+        st.session_state.references = []
+        st.session_state.charts = []
+        st.session_state.quality_metrics = {}
+        st.session_state.is_reviewing = False
     if is_running_status and tid == (st.session_state.get("running_task_id") or tid):
         st.session_state.progress_messages = list(st.session_state.get("running_progress") or st.session_state.get("progress_messages") or [])
     elif not is_running_status:
@@ -642,9 +680,7 @@ def _restore_task(tid: str, topic: str, status: str) -> None:
                     break
         st.session_state.task_started_at = started or st.session_state.get("task_started_at") or 0.0
         st.session_state.running_started_at = st.session_state.task_started_at
-        if status in phase_order:
-            for p in phase_order[: phase_order.index(status)]:
-                st.session_state.phases[p] = True
+        _mark_phase_reached(status)
     else:
         st.session_state.task_status = "idle"
         st.session_state.stream_consumed = True
@@ -660,6 +696,8 @@ def _restore_task(tid: str, topic: str, status: str) -> None:
             st.session_state.report = report_data["report"]
             if status == "reviewing":
                 st.session_state.report_draft = report_data["report"]
+                st.session_state.revision_count = int(report_data.get("revision_count") or 0)
+                st.session_state.max_revisions = int(report_data.get("max_revisions") or 3)
             st.session_state.references = report_data.get("references", [])
             st.session_state.charts = report_data.get("charts", [])
             st.session_state.quality_metrics = report_data.get("quality_metrics") or {}
@@ -712,12 +750,15 @@ def upload_research_docs(uploaded_files: list) -> dict | None:
         return None
 
 
-def submit_review(thread_id: str, feedback: str) -> dict | None:
-    """提交审核；4xx 时返回带 message 的错误字典以便前端展示 detail"""
+def submit_review(thread_id: str, feedback: str, action: str = "") -> dict | None:
+    """提交审核（action: approve/revise，显式传意图；空则后端按旧文本规则兼容）"""
     try:
+        payload = {"feedback": feedback}
+        if action:
+            payload["action"] = action
         resp = requests.post(
             f"{API_BASE_URL}/api/research/{thread_id}/review",
-            json={"feedback": feedback},
+            json=payload,
             timeout=15,
         )
         if resp.status_code == 200:
@@ -745,30 +786,41 @@ def get_report(thread_id: str) -> dict | None:
         return None
 
 
-def consume_sse_sync(thread_id: str, max_retries: int = 3, retry_delay: float = 1.0):
+def consume_sse_sync(thread_id: str, max_retries: int = 3, retry_delay: float = 1.0, since: int = 0):
     """同步消费 SSE 流式事件
 
     Args:
         thread_id: 任务线程 ID
         max_retries: 连接失败时的最大重试次数（用于返工场景下后端队列尚未就绪的情况）
         retry_delay: 每次重试之间的等待秒数
+        since: 只接收该序号之后的事件（服务端事件日志重放锚点，防止重复）
     """
-    url = f"{API_BASE_URL}/api/research/{thread_id}/stream"
+    url = f"{API_BASE_URL}/api/research/{thread_id}/stream?since={int(since)}"
 
     for attempt in range(max_retries + 1):
         try:
             with requests.get(url, stream=True, timeout=None) as response:
                 if response.status_code == 404:
-                    # 队列不存在（常见于服务重启后队列丢失）→
+                    # 队列不存在（服务重启丢队列 / 任务刚结束被摘除）→
                     # 先尝试从 checkpoint 断点复活任务，再重连
+                    resumed = False
                     if attempt == 0:
                         try:
-                            requests.post(
+                            r = requests.post(
                                 f"{API_BASE_URL}/api/research/{thread_id}/resume", timeout=30
                             )
-                            time.sleep(2)
+                            resumed = r.status_code == 200 and r.json().get("status") == "resumed"
                         except Exception:
-                            pass
+                            resumed = False
+                        if resumed:
+                            time.sleep(2)
+                    if not resumed:
+                        # 无法复活：任务可能恰好已结束（reviewing/completed/failed），
+                        # 回查真实状态并转入结果展示，而不是误报错误
+                        real_status = _probe_task_status(thread_id)
+                        if real_status in ("reviewing", "completed", "failed"):
+                            yield "task_finished", {"status": real_status}
+                            return
                     if attempt < max_retries:
                         time.sleep(retry_delay)
                         continue
@@ -829,75 +881,84 @@ def fetch_task_progress(thread_id: str) -> dict | None:
 
 
 # ============ 核心流程：消费 SSE 并更新状态 ============
-def process_stream(thread_id: str):
-    """消费 SSE 流，将事件写入 session_state 并触发 rerun"""
+def _finalize_task_view(thread_id: str, fin: str) -> None:
+    """把会话切到任务的终态视图（reviewing/completed/failed）并拉取报告"""
+    if fin == "reviewing":
+        st.session_state.task_status = "reviewing"
+        st.session_state.is_reviewing = True
+        _mark_phase_reached("reviewing")
+    elif fin == "completed":
+        st.session_state.task_status = "completed"
+        _mark_phase_reached("completed")
+    else:
+        st.session_state.task_status = "error"
+        if not st.session_state.error_message:
+            st.session_state.error_message = "任务已失败（检索或生成未完成）"
+    st.session_state.stream_consumed = True
+    report_data = get_report(thread_id)
+    if report_data and report_data.get("report"):
+        st.session_state.report = report_data["report"]
+        if fin == "reviewing":
+            st.session_state.report_draft = report_data["report"]
+            st.session_state.revision_count = int(report_data.get("revision_count") or 0)
+            st.session_state.max_revisions = int(report_data.get("max_revisions") or 3)
+        st.session_state.references = report_data.get("references") or []
+        st.session_state.charts = report_data.get("charts") or []
+        st.session_state.quality_metrics = report_data.get("quality_metrics") or {}
+
+
+def process_stream(thread_id: str, slice_seconds: float = 2.5) -> None:
+    """分片消费 SSE 事件写入 session_state（由 main 循环调用并 rerun）
+
+    非阻塞设计：每轮先拉服务端进度历史（日志权威来源）拿 upto_seq 作重放
+    锚点，只听其后事件；时间片到即断开，让脚本跑完整个渲染周期再 rerun —
+    页面在任务运行期间保持可交互，且 Streamlit 按轮清理未刷新的旧元素，
+    不会残留上一视图的报告/审核区。
+    """
     st.session_state.task_status = "running"
     st.session_state.stream_consumed = False
 
-    # 先拉服务端进度历史（刷新/切换后补齐），再接 SSE 听新事件
+    hist = None
     try:
         hist = fetch_task_progress(thread_id)
-        if hist:
-            server_msgs = hist.get("messages") or []
-            if server_msgs:
-                st.session_state.progress_messages = list(server_msgs)[-50:]
-                if st.session_state.get("running_task_id") == thread_id:
-                    st.session_state["running_progress"] = list(st.session_state.progress_messages)
-            st0 = float(hist.get("started_at") or 0)
-            if st0 > 0:
-                st.session_state.task_started_at = st0
-                st.session_state.running_started_at = st0
     except Exception:
         pass
+    since = 0
+    if hist:
+        server_msgs = hist.get("messages") or []
+        if server_msgs:
+            st.session_state.progress_messages = list(server_msgs)[-50:]
+            if st.session_state.get("running_task_id") == thread_id:
+                st.session_state["running_progress"] = list(st.session_state.progress_messages)
+        st0 = float(hist.get("started_at") or 0)
+        if st0 > 0:
+            st.session_state.task_started_at = st0
+            st.session_state.running_started_at = st0
+        since = int(hist.get("upto_seq") or 0)
 
-    # 秒表独立占位：只渲染一次 JS，heartbeat 不再重绘时间（避免 2s 跳）
     if not st.session_state.get("task_started_at"):
         st.session_state.task_started_at = time.time()
-    with st.empty().container():
-        _render_js_stopwatch(st.session_state.task_started_at, dom_id="sw-stream")
 
-    phases_placeholder = st.empty()
-    log_placeholder = st.empty()
-    meta_placeholder = st.empty()
+    deadline = time.time() + slice_seconds
+    ended_normally = True
+    for event_type, data in consume_sse_sync(thread_id, since=since):
+        if time.time() >= deadline:
+            # 时间片到：断开连接，让本轮脚本跑完渲染并由 main 触发下一轮
+            ended_normally = False
+            break
 
-    token_buffer = []  # 用于收集 token 事件的内容
-    last_render = 0.0
-
-    def _paint(force: bool = False, writing_chars: int | None = None):
-        nonlocal last_render
-        now = time.time()
-        if not force and (now - last_render) < 0.3:
-            return
-        last_render = now
-        with phases_placeholder.container():
-            _phase_step_rows()
-        with log_placeholder.container():
-            _render_progress_log()
-        with meta_placeholder.container():
-            # 不在这里显示秒表时间，避免与 JS 秒表抢刷新
-            if writing_chars is not None:
-                st.caption(f"正在撰写综述… 已生成 {writing_chars} 字")
-            else:
-                st.caption("连接正常，系统处理中")
-
-    # 先画一次阶段/日志：从历史切到运行中任务时，若 SSE 暂无新事件也不会空白
-    _paint(force=True)
-
-    for event_type, data in consume_sse_sync(thread_id):
         if event_type == "heartbeat":
-            # 仅保活；时间由 JS 秒表每秒自增，阶段/日志在有真实事件时再刷
+            # 仅保活；时间由 JS 秒表每秒自增
             continue
 
         if event_type == "phase":
             phase = data.get("phase", "")
             st.session_state.current_phase = phase
-            if phase in st.session_state.phases:
-                st.session_state.phases[phase] = True
+            _mark_phase_reached(phase)
             if phase == "failed":
                 st.session_state.task_status = "error"
                 if not st.session_state.error_message:
                     st.session_state.error_message = "任务已失败（检索或生成未完成）"
-            _paint(force=True)
 
         elif event_type == "progress":
             msg = data.get("message", "")
@@ -909,19 +970,13 @@ def process_stream(thread_id: str):
                 st.session_state.progress_messages = st.session_state.progress_messages[-50:]
                 if st.session_state.get("running_task_id") == thread_id:
                     st.session_state["running_progress"] = list(st.session_state.progress_messages)
-            _paint(force=True)
 
         elif event_type == "token":
             content = data.get("content", "")
-            token_buffer.append(content)
-            if len(token_buffer) % 20 == 0:
-                total_chars = sum(len(c) for c in token_buffer)
-                _paint(writing_chars=total_chars)
+            st.session_state.writing_chars = int(st.session_state.get("writing_chars") or 0) + len(content)
 
         elif event_type == "complete":
             report = data.get("report", "")
-            if token_buffer:
-                report = "".join(token_buffer) if not report else report
             st.session_state.report = report
             refs = data.get("references", [])
             charts = data.get("charts", [])
@@ -929,31 +984,43 @@ def process_stream(thread_id: str):
                 st.session_state.references = refs
             if charts:
                 st.session_state.charts = charts
+            qm = data.get("quality_metrics") or {}
+            if qm:
+                st.session_state.quality_metrics = qm
             st.session_state.task_status = "completed"
-            st.session_state.phases["completed"] = True
+            _mark_phase_reached("completed")
             st.session_state.stream_consumed = True
-            _paint(force=True)
-            break
+            return
 
         elif event_type == "interrupt":
-            draft = data.get("report_draft", "")
-            st.session_state.report_draft = draft
-            if token_buffer and not draft:
-                st.session_state.report_draft = "".join(token_buffer)
+            st.session_state.report_draft = data.get("report_draft", "")
             st.session_state.is_reviewing = True
             st.session_state.task_status = "reviewing"
-            st.session_state.phases["reviewing"] = True
+            _mark_phase_reached("reviewing")
+            st.session_state.revision_count = int(data.get("revision_count") or 0)
+            st.session_state.max_revisions = int(data.get("max_revisions") or 3)
             st.session_state.stream_consumed = True
-            _paint(force=True)
-            break
+            return
+
+        elif event_type == "task_finished":
+            # SSE 队列已消失但任务其实已结束（切换/刷新与任务完成撞车的竞态）：
+            # 回查到真实终态后直接转入对应视图，而不是误报「任务未找到」
+            _finalize_task_view(thread_id, data.get("status", ""))
+            return
 
         elif event_type == "error":
             err_msg = data.get("message", "未知错误")
             st.session_state.error_message = err_msg
             st.session_state.task_status = "error"
             st.session_state.stream_consumed = True
-            _paint(force=True)
-            break
+            return
+
+    # 流被服务端正常关闭但未收到终态事件（如任务恰好结束且 since 已越过
+    # 终止事件）：回查真实状态并转入终态视图，防止停留在 running 反复重连
+    if ended_normally and not st.session_state.stream_consumed:
+        real_status = _probe_task_status(thread_id)
+        if real_status in ("reviewing", "completed", "failed"):
+            _finalize_task_view(thread_id, real_status)
 
 
 def _svg_status_icon(kind: str, *, size: int = 18) -> str:
@@ -1387,7 +1454,7 @@ def render_sidebar():
                         _render_js_stopwatch(started, dom_id=f"sw-{rid[:8]}")
                 with col_open_run:
                     if st.button("查看", key=f"run-open-{rid}", use_container_width=True):
-                        _restore_task(rid, rtopic, "searching")
+                        _restore_task(rid, r.get("topic") or "未命名研究", r.get("phase") or "searching")
         else:
             st.caption("暂无进行中的任务")
 
@@ -1523,6 +1590,8 @@ def render_input_section():
         st.session_state.error_message = ""
         st.session_state.is_reviewing = False
         st.session_state.stream_consumed = False
+        st.session_state.writing_chars = 0
+        st.session_state.revision_count = 0
         for k in st.session_state.phases:
             st.session_state.phases[k] = False
 
@@ -1555,6 +1624,8 @@ def render_input_section():
             st.session_state.running_topic = topic.strip()
             st.session_state.running_progress = []
             st.session_state.task_status = "running"
+            # 种子阶段：后端初始 phase 事件可能先于前端 /progress 落盘（since 会跳过它）
+            st.session_state.current_phase = "searching"
             # 写入 URL，刷新后可恢复
             try:
                 st.query_params["tid"] = result["thread_id"]
@@ -1583,6 +1654,13 @@ def render_progress_section():
 
     # 显示进度消息（固定高度滚动容器，页面不被撑长）
     _render_progress_log()
+
+    if st.session_state.task_status == "running":
+        wc = int(st.session_state.get("writing_chars") or 0)
+        if st.session_state.current_phase == "writing" and wc > 0:
+            st.caption(f"正在撰写综述… 已生成 {wc} 字")
+        else:
+            st.caption("连接正常，系统处理中")
 
 
 def _render_progress_ui():
@@ -1803,41 +1881,47 @@ def render_review_section():
     st.divider()
     st.markdown("### 人工审核")
 
+    rc = int(st.session_state.get("revision_count") or 0)
+    mx = int(st.session_state.get("max_revisions") or 3)
+    if rc:
+        st.caption(f"当前为第 {rc} 次返工后的版本（最多可返工 {mx} 次）")
+
     col_feedback, col_actions = st.columns([3, 1])
 
     with col_feedback:
         feedback = st.text_input(
             "审核意见",
-            placeholder='输入 "通过" 或修改意见，如 "请补充XX数据"',
+            placeholder='返工需填写修改意见，如 "请补充XX数据"；点"通过"可直接通过',
             label_visibility="collapsed",
         )
 
     with col_actions:
+        # 按钮显式携带意图（action），不再靠输入文本猜：
+        # "通过"无需输入；"返工"必须有修改意见
         approve_clicked = st.button(
-            "通过",
-            use_container_width=True,
-            disabled=not feedback.strip(),
+            "通过", use_container_width=True, type="primary"
         )
         revise_clicked = st.button(
             "返工",
             use_container_width=True,
             disabled=not feedback.strip(),
+            help="按修改意见修订报告（需先填写意见）",
         )
 
-    if approve_clicked and feedback.strip():
-        _do_review(feedback.strip())
+    if approve_clicked:
+        _do_review(feedback.strip(), "approve")
     elif revise_clicked and feedback.strip():
-        _do_review(feedback.strip())
+        _do_review(feedback.strip(), "revise")
 
 
-def _do_review(feedback: str):
-    """执行审核提交"""
+def _do_review(feedback: str, action: str = ""):
+    """执行审核提交（action: approve 直接通过 / revise 按意见返工）"""
     thread_id = st.session_state.thread_id
     if not thread_id:
         return
 
     with st.spinner("正在提交审核意见..."):
-        result = submit_review(thread_id, feedback)
+        result = submit_review(thread_id, feedback, action)
 
     if result is None:
         st.error("审核提交失败，请重试。")
@@ -1871,6 +1955,7 @@ def _do_review(feedback: str):
         st.session_state.progress_messages = []
         st.session_state.current_phase = ""
         st.session_state.stream_consumed = False
+        st.session_state.writing_chars = 0
         # 等待后台 SSE 队列就绪，避免前端重连时后端尚未创建队列
         time.sleep(1)
         st.rerun()
@@ -1898,7 +1983,8 @@ def main():
         rstat = "searching"
         for r in running:
             if r.get("thread_id") == qtid:
-                rstat = "searching"
+                # 用 checkpoint 里的真实阶段（/running 返回），而非一律当作 searching
+                rstat = r.get("phase") or "searching"
                 if not st.session_state.get("running_started_at"):
                     st.session_state.running_started_at = float(r.get("started_at") or 0)
                 break
@@ -1917,10 +2003,14 @@ def main():
     thread_id = st.session_state.get("thread_id")
 
     if thread_id and st.session_state.task_status == "running" and not st.session_state.stream_consumed:
-        # 正在运行且流尚未消费完 → 消费 SSE
+        # 分片消费 SSE：先渲染完整页面（报告/审核区按当前空状态渲染，Streamlit
+        # 在每轮运行结束时清理未刷新的旧元素，不残留上一视图内容），再消费
+        # 一小段事件后 rerun 进入下一轮 — 页面在任务运行期间全程可交互
         st.divider()
+        render_progress_section()
+        render_report_section()
+        render_review_section()
         process_stream(thread_id)
-        # 流消费完毕后 rerun 以刷新 UI
         st.rerun()
 
     if thread_id:
