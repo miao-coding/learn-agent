@@ -382,6 +382,11 @@ def init_session_state():
         "charts": [],
         "quality_metrics": {},
         "task_started_at": 0.0,
+        # 运行中任务独立快照：切换历史/刷新时不丢
+        "running_task_id": "",
+        "running_started_at": 0.0,
+        "running_topic": "",
+        "running_progress": [],
         "phases": {
             "searching": False,
             "analyzing": False,
@@ -578,16 +583,37 @@ def _restore_task(tid: str, topic: str, status: str) -> None:
     """
     st.session_state.thread_id = tid
     st.session_state.topic = topic
-    st.session_state.report = ""
-    st.session_state.report_draft = ""
-    st.session_state.references = []
-    st.session_state.charts = []
-    st.session_state.progress_messages = []
+    try:
+        st.query_params["tid"] = tid
+        st.query_params["topic"] = (topic or "")[:80]
+        if float(st.session_state.get("task_started_at") or 0) > 0:
+            st.query_params["t0"] = str(int(st.session_state.task_started_at))
+    except Exception:
+        pass
     st.session_state.error_message = ""
     st.session_state.is_reviewing = status == "reviewing"
 
     running_phases = ("initializing", "searching", "analyzing", "writing")
     phase_order = ["searching", "analyzing", "writing"]
+
+    # 若另有任务在跑：先把其进度快照存起来，避免被本函数清空
+    prev_tid = st.session_state.get("running_task_id") or ""
+    if prev_tid and prev_tid != tid and st.session_state.get("task_status") == "running":
+        st.session_state["running_progress"] = list(st.session_state.get("progress_messages") or [])
+        if st.session_state.get("task_started_at"):
+            st.session_state["running_started_at"] = float(st.session_state.task_started_at)
+
+    # 切到运行中任务：尽量保留/恢复进度，禁止无故清空
+    is_running_status = status in running_phases
+    if is_running_status and tid == (st.session_state.get("running_task_id") or tid):
+        st.session_state.progress_messages = list(st.session_state.get("running_progress") or st.session_state.get("progress_messages") or [])
+    elif not is_running_status:
+        st.session_state.progress_messages = []
+        st.session_state.report = ""
+        st.session_state.report_draft = ""
+        st.session_state.references = []
+        st.session_state.charts = []
+        st.session_state.quality_metrics = {}
 
     if status == "completed":
         st.session_state.task_status = "completed"
@@ -601,19 +627,21 @@ def _restore_task(tid: str, topic: str, status: str) -> None:
     elif status == "reviewing":
         st.session_state.task_status = "reviewing"
         st.session_state.stream_consumed = True
-    elif status in running_phases:
-        # 运行中：重新挂回实时流，继续接收后续进度
+    elif is_running_status:
         st.session_state.task_status = "running"
         st.session_state.stream_consumed = False
         st.session_state.current_phase = status
-        # 从服务器取绝对开始时间，切换历史后秒表仍连续
-        st.session_state.task_started_at = 0.0
-        for r in fetch_running_tasks():
-            if r.get("thread_id") == tid:
-                st.session_state.task_started_at = float(r.get("started_at") or 0) or time.time()
-                break
-        if not st.session_state.task_started_at:
-            st.session_state.task_started_at = time.time()
+        st.session_state.running_task_id = tid
+        st.session_state.running_topic = topic
+        # 优先：本地快照 → 服务器 started_at → 再不用“现在”（避免从 0 开始）
+        started = float(st.session_state.get("running_started_at") or 0)
+        if not started:
+            for r in fetch_running_tasks():
+                if r.get("thread_id") == tid:
+                    started = float(r.get("started_at") or 0)
+                    break
+        st.session_state.task_started_at = started or st.session_state.get("task_started_at") or 0.0
+        st.session_state.running_started_at = st.session_state.task_started_at
         if status in phase_order:
             for p in phase_order[: phase_order.index(status)]:
                 st.session_state.phases[p] = True
@@ -843,9 +871,13 @@ def process_stream(thread_id: str):
         elif event_type == "progress":
             msg = data.get("message", "")
             st.session_state.progress_messages.append(msg)
+            if st.session_state.get("running_task_id") == thread_id:
+                st.session_state["running_progress"] = list(st.session_state.progress_messages)
             # 只保留最近 50 条，防止 session 无限膨胀
             if len(st.session_state.progress_messages) > 50:
                 st.session_state.progress_messages = st.session_state.progress_messages[-50:]
+                if st.session_state.get("running_task_id") == thread_id:
+                    st.session_state["running_progress"] = list(st.session_state.progress_messages)
             _paint(force=True)
 
         elif event_type == "token":
@@ -1485,8 +1517,19 @@ def render_input_section():
         result = submit_research(topic.strip(), selected_model, upload_batch_id)
         if result:
             st.session_state.thread_id = result["thread_id"]
-            st.session_state.task_started_at = time.time()
+            now = time.time()
+            st.session_state.task_started_at = now
+            st.session_state.running_task_id = result["thread_id"]
+            st.session_state.running_started_at = now
+            st.session_state.running_topic = topic.strip()
+            st.session_state.running_progress = []
             st.session_state.task_status = "running"
+            # 写入 URL，刷新后可恢复
+            try:
+                st.query_params["tid"] = result["thread_id"]
+                st.query_params["topic"] = topic.strip()[:80]
+            except Exception:
+                pass
             st.rerun()
         else:
             err = st.session_state.get("_last_submit_err") or "提交任务失败，请检查后端服务是否正常运行。"
@@ -1806,6 +1849,36 @@ def _do_review(feedback: str):
 
 # ============ 主流程 ============
 def main():
+    # 浏览器刷新后：从 URL 恢复最近查看/运行中的任务
+    try:
+        qp = st.query_params
+        qtid = qp.get("tid") or ""
+        qtopic = qp.get("topic") or ""
+        qt0 = qp.get("t0") or ""
+    except Exception:
+        qtid, qtopic, qt0 = "", "", ""
+    if qtid and not st.session_state.get("thread_id"):
+        if qt0:
+            try:
+                st.session_state.running_started_at = float(qt0)
+            except Exception:
+                pass
+        running = fetch_running_tasks()
+        rstat = "searching"
+        for r in running:
+            if r.get("thread_id") == qtid:
+                rstat = "searching"
+                if not st.session_state.get("running_started_at"):
+                    st.session_state.running_started_at = float(r.get("started_at") or 0)
+                break
+        else:
+            # 非运行中：从 history 推断
+            for h in fetch_history(50):
+                if h.get("thread_id") == qtid:
+                    rstat = h.get("status") or "completed"
+                    break
+        _restore_task(qtid, qtopic or "已恢复任务", rstat)
+
     render_header()
     render_sidebar()
     render_input_section()
