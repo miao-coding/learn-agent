@@ -126,7 +126,15 @@ learn_agent/
 │   ├── skills/     LIT_SEARCH / ANALYSIS / REPORT + 模板
 │   ├── tools/      arxiv / lit_sources / visualization / rag / search
 │   └── utils/      citations / quality / upload_docs / progress
-├── frontend/app.py
+├── frontend/
+│   ├── app.py             入口：页面配置 + main 流程组装
+│   ├── api_client.py      后端 HTTP 调用 + SSE 消费
+│   ├── session.py         session_state / 任务恢复 / 终态切换
+│   ├── stream.py          SSE 分片轮询（process_stream）
+│   ├── sidebar.py         侧边栏（说明 / 依赖 / 历史 / 系统设置）
+│   ├── views.py           主区视图（输入 / 进度 / 报告 / 审核）
+│   ├── theme.py           主题 / CSS / SVG 图标 / 秒表
+│   └── markdown_render.py 内嵌报告渲染（锚点 + 目录）
 ├── requirements.txt
 ├── .env.example
 └── pytest.ini
