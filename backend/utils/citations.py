@@ -110,6 +110,13 @@ def extract_reference_meta(
             if m:
                 date = m.group(1)
 
+    m = re.search(r"期刊:\s*([^|\n]+)", text)
+    journal = m.group(1).strip()[:120] if m else ""
+    if journal:
+        import html
+
+        journal = html.unescape(journal)
+
     # 不再用 query 冒充标题；无标题则留空，由调用方决定是否丢弃
     cleaned_title = _clean_reference_title(title) if title else ""
     if cleaned_title and not _is_plausible_title(cleaned_title, query):
@@ -119,6 +126,7 @@ def extract_reference_meta(
         "url": url,
         "date": date,
         "source": source or "web",
+        "journal": journal,
     }
 
 
@@ -187,6 +195,7 @@ def build_references_from_search_results(
                     "url": url,
                     "source": source,
                     "date": meta.get("date") or "",
+                    "journal": meta.get("journal") or "",
                 }
             )
             rid += 1
@@ -288,7 +297,8 @@ def format_references_section(references: list[dict[str, Any]]) -> str:
         url = r.get("url") or ""
         source = r.get("source") or ""
         date = r.get("date") or ""
-        meta_bits = [b for b in (source, date) if b]
+        journal = r.get("journal") or ""
+        meta_bits = [b for b in (journal, source, date) if b]
         meta = f" ({' · '.join(meta_bits)})" if meta_bits else ""
         if url:
             lines.append(f"[{rid}] [{title}]({url}){meta}")

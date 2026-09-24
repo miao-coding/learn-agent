@@ -1837,9 +1837,10 @@ def _render_references_tab():
             ref_id = ref.get("id", "")
             title = ref.get("title", "未知")
             url = ref.get("url", "")
+            journal = ref.get("journal", "")
             source = ref.get("source", "")
             date = ref.get("date", "")
-            meta = " · ".join(filter(None, [source, date]))
+            meta = " · ".join(filter(None, [journal, source, date]))
             if url:
                 st.markdown(f"**[{ref_id}]** [{title}]({url}) — {meta}")
             else:

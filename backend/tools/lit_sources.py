@@ -25,7 +25,7 @@ def _clean(s: str) -> str:
 
 
 def _fmt_entry(i: int, title: str, authors: str, year: Any, cited: Any,
-               url: str, doi: str, source: str, abstract: str = "") -> str:
+               url: str, doi: str, source: str, abstract: str = "", journal: str = "") -> str:
     parts = [f"[{i}] {_clean(title)[:180]}"]
     if authors:
         parts.append(f"    作者: {authors[:160]}")
@@ -34,6 +34,8 @@ def _fmt_entry(i: int, title: str, authors: str, year: Any, cited: Any,
         meta.append(f"年份: {year}")
     if cited is not None:
         meta.append(f"被引: {cited}")
+    if journal:
+        meta.append(f"期刊: {_clean(journal)[:120]}")
     if doi:
         meta.append(f"DOI: {doi}")
     meta.append(f"来源库: {source}")
@@ -57,7 +59,7 @@ def _crossref_search_impl(query: str, max_results: int = 8) -> str:
                 "query.bibliographic": q,
                 "rows": n,
                 "filter": "type:journal-article",
-                "select": "title,DOI,published-print,published-online,URL,author,abstract,is-referenced-by-count",
+                "select": "title,DOI,published-print,published-online,URL,author,abstract,is-referenced-by-count,container-title",
             },
             headers=_UA,
             timeout=10,
@@ -81,10 +83,11 @@ def _crossref_search_impl(query: str, max_results: int = 8) -> str:
             parts = pub.get("date-parts") or [[None]]
             year = (parts[0] or [None])[0]
             cited = it.get("is-referenced-by-count")
+            journal = (it.get("container-title") or [""])[0] or ""
             abstract = ""
             if it.get("abstract"):
                 abstract = re.sub(r"<[^>]+>", " ", str(it["abstract"]))
-            lines.append(_fmt_entry(i, title, authors, year, cited, url, doi, "crossref", abstract))
+            lines.append(_fmt_entry(i, title, authors, year, cited, url, doi, "crossref", abstract, journal=journal))
         return "\n".join(lines)
     except Exception as e:
         logger.warning(f"Crossref 搜索失败: {e}")
@@ -149,8 +152,7 @@ def _openalex_search_impl(query: str, max_results: int = 8, from_year: int = 0) 
                         pairs.append((pos, word))
                 pairs.sort()
                 abstract = " ".join(w for _, w in pairs)[:420]
-            extra = src_name or "openalex"
-            lines.append(_fmt_entry(i, title, ", ".join(authors), year, cited, url, doi, extra, abstract))
+            lines.append(_fmt_entry(i, title, ", ".join(authors), year, cited, url, doi, "openalex", abstract, journal=src_name or ""))
         return "\n".join(lines)
     except Exception as e:
         logger.warning(f"OpenAlex 搜索失败: {e}")
@@ -186,7 +188,8 @@ def _europepmc_search_impl(query: str, max_results: int = 6) -> str:
             )
             authors = r.get("authorString") or ""
             abstract = r.get("abstractText") or ""
-            lines.append(_fmt_entry(i, title, authors, year, cited, url, doi, "europepmc", abstract))
+            journal = r.get("journalTitle") or ""
+            lines.append(_fmt_entry(i, title, authors, year, cited, url, doi, "europepmc", abstract, journal=journal))
         return "\n".join(lines)
     except Exception as e:
         logger.warning(f"EuropePMC 搜索失败: {e}")
@@ -225,7 +228,11 @@ def _core_search_impl(query: str, max_results: int = 6) -> str:
                 url = f"https://doi.org/{doi}"
             authors = ", ".join(a.get("name", "") for a in (w.get("authors") or [])[:4])
             abstract = w.get("abstract") or ""
-            lines.append(_fmt_entry(i, title, authors, year, cited, str(url), doi, "core", abstract))
+            journals = w.get("journals") or []
+            journal = _clean(journals[0]) if isinstance(journals, list) and journals else (
+                _clean(journals) if isinstance(journals, str) else ""
+            )
+            lines.append(_fmt_entry(i, title, authors, year, cited, str(url), doi, "core", abstract, journal=journal))
         return "\n".join(lines)
     except Exception as e:
         logger.warning(f"CORE 搜索失败: {e}")

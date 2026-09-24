@@ -98,6 +98,7 @@ def _parse_papers(results) -> str:
             f"[{i}] {paper.title}\n"
             f"    作者: {authors}\n"
             f"    日期: {paper.published.strftime('%Y-%m-%d')}\n"
+            f"    期刊: arXiv (预印本)\n"
             f"    arXiv ID: {paper_id}\n"
             f"    分类: {', '.join(categories)}\n"
             f"    摘要: {paper.summary[:500]}...\n"

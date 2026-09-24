@@ -433,11 +433,11 @@ def _format_references(references: list[dict[str, Any]]) -> str:
         url = ref.get("url", "")
         source = ref.get("source", "")
         date = ref.get("date", "")
+        journal = ref.get("journal", "")
+        bits = [b for b in (journal, source, date) if b]
         line = f"[{ref_id}] {title}"
-        if source:
-            line += f" ({source})"
-        if date:
-            line += f", {date}"
+        if bits:
+            line += f" ({' · '.join(bits)})"
         if url:
             line += f" - {url}"
         parts.append(line)
