@@ -231,6 +231,7 @@ async def _run_graph(
         active_tasks.pop(thread_id, None)
         task_started_at.pop(thread_id, None)
         task_meta.pop(thread_id, None)
+        # 保留 progress 缓冲一段时间，不在此清空
 
 
 async def _finalize_stream(graph: Any, config: dict, queue: asyncio.Queue) -> None:
@@ -346,6 +347,18 @@ def _build_progress_message(
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  GET /api/research/{thread_id}/stream — SSE 流式推送
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+@router.get("/research/{thread_id}/progress")
+async def get_task_progress(thread_id: str, limit: int = 50):
+    """任务进度历史（内存缓冲），供刷新/重连后补齐日志"""
+    from backend.utils.progress import get_progress_messages
+
+    return {
+        "thread_id": thread_id,
+        "messages": get_progress_messages(thread_id, limit=limit),
+        "started_at": float(task_started_at.get(thread_id) or 0),
+    }
+
+
 @router.get("/research/{thread_id}/stream")
 async def stream_research(thread_id: str):
     """SSE 流式推送研究进度"""
@@ -539,6 +552,7 @@ async def _resume_and_stream(
         active_tasks.pop(thread_id, None)
         task_started_at.pop(thread_id, None)
         task_meta.pop(thread_id, None)
+        # 保留 progress 缓冲一段时间，不在此清空
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -855,7 +869,7 @@ async def delete_research(thread_id: str, request: Request):
     # 从活跃 SSE 队列摘除（运行中任务删除后不再推送）
     active_tasks.pop(thread_id, None)
     try:
-        progress_bus.unregister(thread_id)
+        progress_bus.clear_progress(thread_id)
     except Exception:
         pass
 

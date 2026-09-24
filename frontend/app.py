@@ -813,11 +813,42 @@ def consume_sse_sync(thread_id: str, max_retries: int = 3, retry_delay: float = 
             return
 
 
+def fetch_task_progress(thread_id: str) -> dict | None:
+    """拉取服务端进度历史 + started_at（刷新/重连补齐日志）"""
+    try:
+        resp = requests.get(
+            f"{API_BASE_URL}/api/research/{thread_id}/progress",
+            params={"limit": 50},
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            return resp.json()
+        return None
+    except Exception:
+        return None
+
+
 # ============ 核心流程：消费 SSE 并更新状态 ============
 def process_stream(thread_id: str):
     """消费 SSE 流，将事件写入 session_state 并触发 rerun"""
     st.session_state.task_status = "running"
     st.session_state.stream_consumed = False
+
+    # 先拉服务端进度历史（刷新/切换后补齐），再接 SSE 听新事件
+    try:
+        hist = fetch_task_progress(thread_id)
+        if hist:
+            server_msgs = hist.get("messages") or []
+            if server_msgs:
+                st.session_state.progress_messages = list(server_msgs)[-50:]
+                if st.session_state.get("running_task_id") == thread_id:
+                    st.session_state["running_progress"] = list(st.session_state.progress_messages)
+            st0 = float(hist.get("started_at") or 0)
+            if st0 > 0:
+                st.session_state.task_started_at = st0
+                st.session_state.running_started_at = st0
+    except Exception:
+        pass
 
     # 秒表独立占位：只渲染一次 JS，heartbeat 不再重绘时间（避免 2s 跳）
     if not st.session_state.get("task_started_at"):
